@@ -1,5 +1,5 @@
 /*
- * MDView v2.1 - Total Commander Lister Plugin for Markdown
+ * MDView v2.3 - Total Commander Lister Plugin for Markdown
  * =========================================================
  * Lightweight WLX plugin: built-in Markdown->HTML, embedded MSHTML, zero deps.
  *
@@ -10,8 +10,16 @@
  *   Ctrl+F             Find in page with highlighting
  *   Ctrl+P             Print document
  *   Ctrl+G             Go to top
+ *   Ctrl+C             Copy (HTML from rendered view, raw text from source view)
+ *   Ctrl+A             Select all
+ *   Ctrl+L             Toggle line numbers
+ *   Ctrl+W / Shift+W   Constrain / widen column width
+ *   Ctrl+M             Toggle split view (rendered + raw source side by side)
  *   Escape             Close find bar / TOC / help
  *   F1                 Show keyboard shortcuts help
+ *
+ * Split view with synchronised scrolling contributed by Nigurrath
+ * (Senior Ghisler.ch Total Commander Forum member).
  *
  * (c) 2026 - MIT License
  */
@@ -22,7 +30,13 @@
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0600
 
+/* Split view raw pane font (contributed by Nigurrath) */
+#define MDVIEW_RAW_FONT_NAME L"Cascadia Mono"
+#define MDVIEW_RAW_FONT_PT   11
+
 #include <windows.h>
+#include <windowsx.h>
+#include <richedit.h>
 #include <ole2.h>
 #include <exdisp.h>
 #include <mshtml.h>
@@ -46,10 +60,10 @@ typedef struct {
 } ListDefaultParamStruct;
 
 static LRESULT CALLBACK ContainerWndProc(HWND, UINT, WPARAM, LPARAM);
-static char* read_file_utf8(const char*);
+static char* read_file_w(const WCHAR*);
 static char* md_to_html(const char*);
 static int   is_dark_theme(void);
-static void  navigate_to_html(IWebBrowser2*, const char*);
+static void  navigate_to_html(IWebBrowser2*, const char*, const WCHAR*, WCHAR*);
 
 static const wchar_t CLASS_NAME[] = L"MDViewWLXContainer";
 static HINSTANCE g_hInstance = NULL;
@@ -60,6 +74,15 @@ typedef struct {
     IOleObject*   pOleObj;
     HWND          hwndIEServer;  /* The actual IE rendering window */
     WNDPROC       origIEProc;    /* Original wndproc of IE Server */
+    WCHAR         tempFile[MAX_PATH]; /* Temp HTML file for local resource loading */
+    /* Split view fields (contributed by Nigurrath) */
+    HWND          hwndContainer; /* Our container window */
+    HWND          hwndText;      /* Raw text view (RichEdit), optional */
+    WNDPROC       origTextProc;  /* Subclass of raw text control */
+    HFONT         hTextFont;     /* Font for raw text view */
+    int           splitView;     /* 0 = normal, 1 = split */
+    int           syncGuard;     /* Recursion guard for scroll sync */
+    char*         mdUtf8;        /* Raw markdown (UTF-8), owned */
 } MDViewData;
 
 /* Execute JavaScript on the browser document */
@@ -86,6 +109,223 @@ static void exec_js(IWebBrowser2* pB, const wchar_t* code) {
     IHTMLWindow2_Release(pWin);
 }
 
+/* ── OLE clipboard helpers (contributed by Nigurrath) ────────────────── */
+
+static void browser_execwb(IWebBrowser2* pBrowser, OLECMDID cmd) {
+    if (!pBrowser) return;
+    IWebBrowser2_ExecWB(pBrowser, cmd, OLECMDEXECOPT_DODEFAULT, NULL, NULL);
+}
+
+static int is_child_of(HWND child, HWND parent) {
+    while (child) { if (child == parent) return 1; child = GetParent(child); }
+    return 0;
+}
+
+/* Context-aware copy: HTML from rendered view, raw markdown from source view */
+static void do_copy(MDViewData* d) {
+    if (!d) return;
+    HWND f = GetFocus();
+    if (d->hwndText && (f == d->hwndText || is_child_of(f, d->hwndText))) {
+        SendMessageW(d->hwndText, WM_COPY, 0, 0);
+        return;
+    }
+    if (d->pBrowser) browser_execwb(d->pBrowser, OLECMDID_COPY);
+}
+
+static int get_document_title_utf8(IWebBrowser2* pB, char* out, int outsz) {
+    if (!pB || !out || outsz <= 0) return 0;
+    out[0] = '\0';
+    IDispatch* pDisp = NULL;
+    IWebBrowser2_get_Document(pB, &pDisp);
+    if (!pDisp) return 0;
+    IHTMLDocument2* pDoc = NULL;
+    IDispatch_QueryInterface(pDisp, &IID_IHTMLDocument2, (void**)&pDoc);
+    IDispatch_Release(pDisp);
+    if (!pDoc) return 0;
+    BSTR bTitle = NULL;
+    IHTMLDocument2_get_title(pDoc, &bTitle);
+    IHTMLDocument2_Release(pDoc);
+    if (!bTitle) return 0;
+    WideCharToMultiByte(CP_UTF8, 0, bTitle, -1, out, outsz, NULL, NULL);
+    SysFreeString(bTitle);
+    return 1;
+}
+
+/* ── Split view scroll synchronisation (contributed by Nigurrath) ────── */
+
+static double get_html_scroll_ratio(MDViewData* d) {
+    if (!d || !d->pBrowser) return 0.0;
+    exec_js(d->pBrowser,
+        L"(function(){var de=document.documentElement,b=document.body;"
+        L"var st=(de&&de.scrollTop)||(b&&b.scrollTop)||0;"
+        L"var sh=Math.max((de&&de.scrollHeight)||0,(b&&b.scrollHeight)||0);"
+        L"var ih=window.innerHeight||(de&&de.clientHeight)||0;"
+        L"document.title=''+st+','+sh+','+ih;})();");
+    char t[128];
+    if (!get_document_title_utf8(d->pBrowser, t, (int)sizeof(t))) return 0.0;
+    double st=0, sh=0, ih=0;
+    if (sscanf(t, "%lf,%lf,%lf", &st, &sh, &ih) != 3) return 0.0;
+    double denom = sh - ih;
+    if (denom < 1.0) denom = 1.0;
+    double r = st / denom;
+    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
+    return r;
+}
+
+static void set_html_scroll_ratio(MDViewData* d, double r) {
+    if (!d || !d->pBrowser) return;
+    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
+    wchar_t js[256];
+    swprintf(js, 256,
+        L"(function(){var de=document.documentElement,b=document.body;"
+        L"var sh=Math.max((de&&de.scrollHeight)||0,(b&&b.scrollHeight)||0);"
+        L"var ih=window.innerHeight||(de&&de.clientHeight)||0;"
+        L"var y=(sh-ih)*%.6f; if(y<0)y=0; window.scrollTo(0,y);})();", r);
+    exec_js(d->pBrowser, js);
+}
+
+static double get_edit_scroll_ratio(HWND hEdit) {
+    if (!hEdit) return 0.0;
+    SCROLLINFO si; ZeroMemory(&si, sizeof(si));
+    si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    if (!GetScrollInfo(hEdit, SB_VERT, &si)) return 0.0;
+    int maxPos = (int)si.nMax - (int)si.nPage + 1;
+    if (maxPos < 1) return 0.0;
+    double r = (double)si.nPos / (double)maxPos;
+    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
+    return r;
+}
+
+static void set_edit_scroll_ratio(HWND hEdit, double r) {
+    if (!hEdit) return;
+    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
+    SCROLLINFO si; ZeroMemory(&si, sizeof(si));
+    si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    if (!GetScrollInfo(hEdit, SB_VERT, &si)) return;
+    int maxPos = (int)si.nMax - (int)si.nPage + 1;
+    if (maxPos < 1) return;
+    int target = (int)((double)maxPos * r + 0.5);
+    if (target < 0) target = 0; if (target > maxPos) target = maxPos;
+    SendMessageW(hEdit, WM_VSCROLL, MAKEWPARAM(SB_THUMBPOSITION, target), 0);
+    SendMessageW(hEdit, WM_VSCROLL, MAKEWPARAM(SB_THUMBTRACK, target), 0);
+}
+
+static void sync_html_to_edit(MDViewData* d) {
+    if (!d || !d->splitView || !d->hwndText || d->syncGuard) return;
+    d->syncGuard = 1;
+    set_edit_scroll_ratio(d->hwndText, get_html_scroll_ratio(d));
+    d->syncGuard = 0;
+}
+
+static void sync_edit_to_html(MDViewData* d) {
+    if (!d || !d->splitView || !d->hwndText || d->syncGuard) return;
+    d->syncGuard = 1;
+    set_html_scroll_ratio(d, get_edit_scroll_ratio(d->hwndText));
+    d->syncGuard = 0;
+}
+
+/* ── Split view layout (contributed by Nigurrath) ────────────────────── */
+
+static void layout_views(MDViewData* d) {
+    if (!d || !d->hwndContainer || !d->pBrowser) return;
+    RECT rc; GetClientRect(d->hwndContainer, &rc);
+    int w = rc.right, h = rc.bottom;
+    int leftW = w, rightW = 0;
+    if (d->splitView && d->hwndText) {
+        leftW = w / 2; rightW = w - leftW;
+        if (leftW < 50) leftW = 50; if (rightW < 50) rightW = 50;
+    }
+    IWebBrowser2_put_Left(d->pBrowser, 0); IWebBrowser2_put_Top(d->pBrowser, 0);
+    IWebBrowser2_put_Width(d->pBrowser, leftW); IWebBrowser2_put_Height(d->pBrowser, h);
+    if (d->pOleObj) {
+        IOleInPlaceObject* pIPO = NULL;
+        IOleObject_QueryInterface(d->pOleObj, &IID_IOleInPlaceObject, (void**)&pIPO);
+        if (pIPO) {
+            RECT rB = { 0, 0, leftW, h };
+            IOleInPlaceObject_SetObjectRects(pIPO, &rB, &rB);
+            IOleInPlaceObject_Release(pIPO);
+        }
+    }
+    HWND child = GetWindow(d->hwndContainer, GW_CHILD);
+    while (child) {
+        if (child == d->hwndText) {
+            if (d->splitView) { ShowWindow(child, SW_SHOW); MoveWindow(child, leftW, 0, rightW, h, TRUE); }
+            else ShowWindow(child, SW_HIDE);
+        } else MoveWindow(child, 0, 0, leftW, h, TRUE);
+        child = GetWindow(child, GW_HWNDNEXT);
+    }
+}
+
+static void toggle_split_view(MDViewData* d);
+
+/* ── RichEdit subclass for raw text pane (contributed by Nigurrath) ──── */
+
+static wchar_t* utf8_to_wide_dup(const char* s) {
+    if (!s) return NULL;
+    int wl = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (wl <= 0) return NULL;
+    wchar_t* w = (wchar_t*)calloc((size_t)wl, sizeof(wchar_t));
+    if (!w) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, wl);
+    return w;
+}
+
+static LRESULT CALLBACK TextViewSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM lP) {
+    MDViewData* d = (MDViewData*)GetPropW(hwnd, L"MDViewData");
+    if (!d) return DefWindowProcW(hwnd, msg, wP, lP);
+    if (msg == WM_KEYDOWN) {
+        int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
+        if (ctrl) {
+            if (wP == 'M') { toggle_split_view(d); return 0; }
+            if (wP == 'C') { SendMessageW(hwnd, WM_COPY, 0, 0); return 0; }
+            if (wP == 'A') { SendMessageW(hwnd, EM_SETSEL, 0, -1); return 0; }
+        }
+    }
+    if (msg == WM_CONTEXTMENU) return 0; /* Use main context menu */
+    LRESULT r = CallWindowProcW(d->origTextProc, hwnd, msg, wP, lP);
+    if (msg == WM_VSCROLL || msg == WM_MOUSEWHEEL ||
+        (msg == WM_KEYDOWN && (wP == VK_UP || wP == VK_DOWN || wP == VK_PRIOR || wP == VK_NEXT || wP == VK_HOME || wP == VK_END)))
+        sync_edit_to_html(d);
+    return r;
+}
+
+static void toggle_split_view(MDViewData* d) {
+    if (!d || !d->hwndContainer) return;
+    if (!d->splitView) {
+        if (!d->hwndText) {
+            LoadLibraryW(L"Msftedit.dll");
+            HWND hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"RICHEDIT50W", L"",
+                WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|ES_NOHIDESEL,
+                0, 0, 0, 0, d->hwndContainer, NULL, g_hInstance, NULL);
+            if (hEdit) {
+                d->hwndText = hEdit;
+                SetPropW(hEdit, L"MDViewData", (HANDLE)d);
+                d->origTextProc = (WNDPROC)SetWindowLongPtrW(hEdit, GWLP_WNDPROC, (LONG_PTR)TextViewSubclassProc);
+                if (!d->hTextFont) {
+                    HDC hdc = GetDC(hEdit);
+                    int dpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+                    if (hdc) ReleaseDC(hEdit, hdc);
+                    LOGFONTW lf = {0};
+                    lf.lfHeight = -MulDiv(MDVIEW_RAW_FONT_PT, dpiY, 72);
+                    lf.lfCharSet = DEFAULT_CHARSET;
+                    wcscpy(lf.lfFaceName, MDVIEW_RAW_FONT_NAME);
+                    d->hTextFont = CreateFontIndirectW(&lf);
+                    if (!d->hTextFont) d->hTextFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+                }
+                SendMessageW(hEdit, WM_SETFONT, (WPARAM)d->hTextFont, TRUE);
+                SendMessageW(hEdit, EM_SETMARGINS, EC_LEFTMARGIN|EC_RIGHTMARGIN, MAKELPARAM(10,10));
+                if (d->mdUtf8) {
+                    wchar_t* w = utf8_to_wide_dup(d->mdUtf8);
+                    if (w) { SetWindowTextW(hEdit, w); free(w); }
+                }
+            }
+        }
+        d->splitView = 1;
+    } else d->splitView = 0;
+    layout_views(d);
+    if (d->splitView && d->hwndText) sync_html_to_edit(d);
+}
+
 /* Subclass proc for the IE Server window - only intercepts our Ctrl+ hotkeys,
    everything else (PgUp, PgDn, arrows, Escape, etc.) passes through untouched */
 static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM lP) {
@@ -103,6 +343,15 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
                 exec_js(d->pBrowser, L"zo()"); return 0;
             case '0': case VK_NUMPAD0:
                 exec_js(d->pBrowser, L"zr()"); return 0;
+            case 'C':
+                /* Context-aware copy (contributed by Nigurrath) */
+                do_copy(d); return 0;
+            case 'A':
+                /* Select All */
+                exec_js(d->pBrowser, L"document.execCommand('selectAll')"); return 0;
+            case 'M':
+                /* Toggle split view (contributed by Nigurrath) */
+                toggle_split_view(d); return 0;
             case 'D':
                 exec_js(d->pBrowser, L"td()"); return 0;
             case 'T':
@@ -128,24 +377,89 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
         if (wP == VK_F1) {
             exec_js(d->pBrowser, L"th()"); return 0;
         }
+        if (wP == VK_F3) {
+            if (GetKeyState(VK_SHIFT) & 0x8000)
+                exec_js(d->pBrowser, L"fp()");
+            else
+                exec_js(d->pBrowser, L"fn()");
+            return 0;
+        }
         /* Escape: the IE control eats it, so forward to TC's lister parent */
         if (wP == VK_ESCAPE) {
-            HWND parent = GetParent(GetParent(GetParent(hwnd))); /* IE_Server -> Shell DocObj -> Shell Embed -> our container -> TC lister */
-            if (!parent) parent = GetParent(GetParent(hwnd));
-            /* Walk up to find TC's lister window and send Escape */
             HWND w = hwnd;
-            while (w) {
-                HWND p = GetParent(w);
-                if (!p) break;
-                /* Send to the topmost parent we can find */
-                w = p;
-            }
+            while (w) { HWND p = GetParent(w); if (!p) break; w = p; }
             if (w) PostMessageW(w, WM_KEYDOWN, VK_ESCAPE, lP);
+            return 0;
+        }
+        /* Enter: navigate find matches (next/prev with Shift) */
+        if (wP == VK_RETURN) {
+            if (GetKeyState(VK_SHIFT) & 0x8000)
+                exec_js(d->pBrowser, L"fp()");
+            else
+                exec_js(d->pBrowser, L"fn()");
             return 0;
         }
     }
 
-    return CallWindowProcW(d->origIEProc, hwnd, msg, wP, lP);
+    /* Prevent menu items from being greyed out */
+    if (msg == WM_INITMENUPOPUP) {
+        HMENU hm = (HMENU)wP;
+        int count = GetMenuItemCount(hm);
+        for (int j = 0; j < count; j++)
+            EnableMenuItem(hm, j, MF_BYPOSITION | MF_ENABLED);
+        return 0;
+    }
+
+    /* Right-click context menu */
+    if (msg == WM_CONTEXTMENU) {
+        enum { IDM_COPY=1, IDM_SELALL, IDM_SPLIT, IDM_FIND, IDM_TOC,
+               IDM_ZOOMIN, IDM_ZOOMOUT, IDM_ZOOMRST, IDM_DARK, IDM_LINES, IDM_PRINT, IDM_HELP };
+        HMENU hm = CreatePopupMenu();
+        AppendMenuW(hm, MF_STRING, IDM_COPY,    L"Copy\tCtrl+C");
+        AppendMenuW(hm, MF_STRING, IDM_SELALL,  L"Select All\tCtrl+A");
+        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hm, MF_STRING, IDM_SPLIT,   d->splitView ? L"Close Source View\tCtrl+M" : L"Split Source View\tCtrl+M");
+        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hm, MF_STRING, IDM_FIND,    L"Find...\tCtrl+F");
+        AppendMenuW(hm, MF_STRING, IDM_TOC,     L"Table of Contents\tCtrl+T");
+        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hm, MF_STRING, IDM_ZOOMIN,  L"Zoom In\tCtrl++");
+        AppendMenuW(hm, MF_STRING, IDM_ZOOMOUT, L"Zoom Out\tCtrl+-");
+        AppendMenuW(hm, MF_STRING, IDM_ZOOMRST, L"Reset Zoom\tCtrl+0");
+        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hm, MF_STRING, IDM_DARK,    L"Toggle Dark Mode\tCtrl+D");
+        AppendMenuW(hm, MF_STRING, IDM_LINES,   L"Line Numbers\tCtrl+L");
+        AppendMenuW(hm, MF_STRING, IDM_PRINT,   L"Print\tCtrl+P");
+        AppendMenuW(hm, MF_STRING, IDM_HELP,    L"Keyboard Shortcuts\tF1");
+        POINT pt; pt.x = GET_X_LPARAM(lP); pt.y = GET_Y_LPARAM(lP);
+        if (pt.x == -1 && pt.y == -1) { GetCursorPos(&pt); }
+        int cmd = TrackPopupMenu(hm, TPM_RETURNCMD|TPM_RIGHTBUTTON|TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, NULL);
+        DestroyMenu(hm);
+        switch(cmd) {
+        case IDM_COPY:    do_copy(d); break;
+        case IDM_SELALL:  exec_js(d->pBrowser, L"document.execCommand('selectAll')"); break;
+        case IDM_SPLIT:   toggle_split_view(d); break;
+        case IDM_FIND:    exec_js(d->pBrowser, L"sf()"); break;
+        case IDM_TOC:     exec_js(d->pBrowser, L"ttoc()"); break;
+        case IDM_ZOOMIN:  exec_js(d->pBrowser, L"zi()"); break;
+        case IDM_ZOOMOUT: exec_js(d->pBrowser, L"zo()"); break;
+        case IDM_ZOOMRST: exec_js(d->pBrowser, L"zr()"); break;
+        case IDM_DARK:    exec_js(d->pBrowser, L"td()"); break;
+        case IDM_LINES:   exec_js(d->pBrowser, L"tl()"); break;
+        case IDM_PRINT:   exec_js(d->pBrowser, L"window.print()"); break;
+        case IDM_HELP:    exec_js(d->pBrowser, L"th()"); break;
+        }
+        return 0;
+    }
+
+    {
+        LRESULT r = CallWindowProcW(d->origIEProc, hwnd, msg, wP, lP);
+        /* Scroll sync: rendered → raw source (contributed by Nigurrath) */
+        if (d->splitView && (msg == WM_VSCROLL || msg == WM_MOUSEWHEEL ||
+            (msg == WM_KEYDOWN && (wP == VK_UP || wP == VK_DOWN || wP == VK_PRIOR || wP == VK_NEXT || wP == VK_HOME || wP == VK_END))))
+            sync_html_to_edit(d);
+        return r;
+    }
 }
 
 /* ── Minimal COM Site Implementation ─────────────────────────────────── */
@@ -253,6 +567,37 @@ static SiteImpl* CreateSiteImpl(HWND hwnd) {
     return s;
 }
 
+/* ── Reference Link Map ──────────────────────────────────────────────── */
+
+typedef struct { char label[128]; char url[1024]; char title[256]; } RefLink;
+typedef struct { RefLink* items; int count; int cap; } RefMap;
+
+static RefMap g_refs = {0};
+
+static void ref_clear(void) { free(g_refs.items); g_refs.items=NULL; g_refs.count=0; g_refs.cap=0; }
+
+static void ref_add(const char* label, const char* url, const char* title) {
+    if (g_refs.count >= g_refs.cap) {
+        g_refs.cap = g_refs.cap ? g_refs.cap*2 : 32;
+        g_refs.items = (RefLink*)realloc(g_refs.items, g_refs.cap * sizeof(RefLink));
+    }
+    RefLink* r = &g_refs.items[g_refs.count++];
+    /* Store label as lowercase for case-insensitive lookup */
+    int i; for(i=0; label[i] && i<127; i++) r->label[i] = (label[i]>='A'&&label[i]<='Z') ? label[i]+32 : label[i];
+    r->label[i] = '\0';
+    strncpy(r->url, url, 1023); r->url[1023]='\0';
+    strncpy(r->title, title, 255); r->title[255]='\0';
+}
+
+static RefLink* ref_find(const char* label) {
+    char lower[128];
+    int i; for(i=0; label[i] && i<127; i++) lower[i] = (label[i]>='A'&&label[i]<='Z') ? label[i]+32 : label[i];
+    lower[i] = '\0';
+    for(int j=0; j<g_refs.count; j++)
+        if(strcmp(g_refs.items[j].label, lower)==0) return &g_refs.items[j];
+    return NULL;
+}
+
 /* ── String Buffer ───────────────────────────────────────────────────── */
 
 typedef struct { char* data; size_t len; size_t cap; } StrBuf;
@@ -299,25 +644,65 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
             if(!found) sb_append_esc(sb,t+st,tk);
             continue;
         }
-        /* Image ![alt](url) */
+        /* Image ![alt](url) or ![alt][ref] */
         if (t[i]=='!' && i+1<len && t[i+1]=='[') {
             size_t as=i+2,j=as; int d=1;
             while(j<len&&d>0){if(t[j]=='[')d++;else if(t[j]==']')d--;if(d>0)j++;}
             if(j<len&&j+1<len&&t[j+1]=='('){
+                /* Inline: ![alt](url) */
                 size_t us=j+2,ue=us; while(ue<len&&t[ue]!=')')ue++;
                 if(ue<len){ sb_append(sb,"<img alt=\""); sb_append_esc(sb,t+as,j-as);
                     sb_append(sb,"\" src=\""); sb_append_esc(sb,t+us,ue-us);
                     sb_append(sb,"\" style=\"max-width:100%\">"); i=ue+1; continue; }
             }
+            if(j<len&&j+1<len&&t[j+1]=='['){
+                /* Reference: ![alt][label] */
+                size_t ls=j+2,le=ls; while(le<len&&t[le]!=']')le++;
+                if(le<len){ char label[128]={0}; size_t ll=le-ls; if(ll>127)ll=127; memcpy(label,t+ls,ll);
+                    RefLink* r=ref_find(label);
+                    if(r){ sb_append(sb,"<img alt=\""); sb_append_esc(sb,t+as,j-as);
+                        sb_append(sb,"\" src=\""); sb_append(sb,r->url);
+                        if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
+                        sb_append(sb,"\" style=\"max-width:100%\">"); i=le+1; continue; }
+                }
+            }
+            /* Also try ![alt] with alt as the label */
+            if(j<len) {
+                char label[128]={0}; size_t ll=j-as; if(ll>127)ll=127; memcpy(label,t+as,ll);
+                RefLink* r=ref_find(label);
+                if(r){ sb_append(sb,"<img alt=\""); sb_append_esc(sb,t+as,j-as);
+                    sb_append(sb,"\" src=\""); sb_append(sb,r->url);
+                    if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
+                    sb_append(sb,"\" style=\"max-width:100%\">"); i=j+1; continue; }
+            }
         }
-        /* Link [text](url) */
+        /* Link [text](url) or [text][ref] */
         if (t[i]=='[') {
             size_t ts=i+1,j=ts; int d=1;
             while(j<len&&d>0){if(t[j]=='[')d++;else if(t[j]==']')d--;if(d>0)j++;}
             if(j<len&&j+1<len&&t[j+1]=='('){
+                /* Inline: [text](url) */
                 size_t us=j+2,ue=us; while(ue<len&&t[ue]!=')')ue++;
                 if(ue<len){ sb_append(sb,"<a href=\""); sb_append_esc(sb,t+us,ue-us);
                     sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts); sb_append(sb,"</a>"); i=ue+1; continue; }
+            }
+            if(j<len&&j+1<len&&t[j+1]=='['){
+                /* Reference: [text][label] */
+                size_t ls=j+2,le=ls; while(le<len&&t[le]!=']')le++;
+                if(le<len){ char label[128]={0}; size_t ll=le-ls; if(ll>127)ll=127; memcpy(label,t+ls,ll);
+                    RefLink* r=ref_find(label);
+                    if(r){ sb_append(sb,"<a href=\""); sb_append(sb,r->url);
+                        if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
+                        sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts); sb_append(sb,"</a>"); i=le+1; continue; }
+                }
+            }
+            /* Also try [text] with text as the label */
+            if(j<len&&(j+1>=len||t[j+1]!='(')) {
+                char label[128]={0}; size_t ll=j-ts; if(ll>127)ll=127; memcpy(label,t+ts,ll);
+                RefLink* r=ref_find(label);
+                if(r){ sb_append(sb,"<a href=\""); sb_append(sb,r->url);
+                    if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
+                    sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts); sb_append(sb,"</a>"); i=j+1; continue; }
             }
         }
         /* Strikethrough ~~text~~ */
@@ -347,6 +732,18 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
             size_t us=i; while(i<len&&t[i]!=' '&&t[i]!='\n'&&t[i]!='\r'&&t[i]!=')'&&t[i]!='>'&&t[i]!='"')i++;
             while(i>us&&(t[i-1]=='.'||t[i-1]==','||t[i-1]==';'))i--;
             sb_append(sb,"<a href=\""); sb_append_esc(sb,t+us,i-us); sb_append(sb,"\">"); sb_append_esc(sb,t+us,i-us); sb_append(sb,"</a>"); continue;
+        }
+        /* Inline HTML — pass through <tag>, </tag>, <tag attr="val">, <br/>, etc. */
+        if (t[i]=='<' && i+1<len && (isalpha(t[i+1]) || t[i+1]=='/' || t[i+1]=='!')) {
+            size_t j=i+1;
+            /* Find the closing > */
+            while(j<len && t[j]!='>') j++;
+            if (j<len) {
+                /* Pass through raw */
+                sb_ensure(sb, j-i+1);
+                for(size_t k=i; k<=j; k++) sb_append_char(sb, t[k]);
+                i=j+1; continue;
+            }
         }
         /* Plain char */
         sb_append_esc(sb,&t[i],1); i++;
@@ -404,10 +801,65 @@ static int is_ol(const char* t) { int i=0; while(t[i]>='0'&&t[i]<='9')i++; if(i=
 
 /* ── Markdown Block Parser ───────────────────────────────────────────── */
 
+static int g_md_depth = 0;
+
 static char* md_to_html(const char* markdown) {
     StrBuf sb; sb_init(&sb);
     Lines lines = split_lines(markdown);
     int i = 0;
+    int is_toplevel = (g_md_depth == 0);
+    g_md_depth++;
+
+    /* First pass: collect reference link definitions [label]: URL "title" */
+    /* Only clear at top level; nested calls (blockquotes, lists) keep parent refs */
+    if (is_toplevel) ref_clear();
+    for (int r = 0; r < lines.count; r++) {
+        const char* rl = lines.lines[r];
+        while (*rl == ' ') rl++;
+        if (rl[0] != '[') continue;
+        /* Parse [label]: */
+        const char* ls = rl + 1;
+        const char* le = ls;
+        while (*le && *le != ']') le++;
+        if (*le != ']' || *(le+1) != ':') continue;
+        size_t labLen = le - ls;
+        if (labLen == 0 || labLen > 127) continue;
+        char label[128]; memcpy(label, ls, labLen); label[labLen] = '\0';
+        /* Check it's not a task list item like [x] or [ ] */
+        if (labLen == 1 && (label[0]=='x' || label[0]=='X' || label[0]==' ')) continue;
+        const char* up = le + 2;
+        while (*up == ' ') up++;
+        /* Parse URL (optionally in angle brackets) */
+        char url[1024] = "";
+        if (*up == '<') {
+            up++;
+            const char* ue = up;
+            while (*ue && *ue != '>') ue++;
+            size_t ul = ue - up; if (ul > 1023) ul = 1023;
+            memcpy(url, up, ul); url[ul] = '\0';
+            up = (*ue == '>') ? ue + 1 : ue;
+        } else {
+            const char* ue = up;
+            while (*ue && *ue != ' ' && *ue != '\t' && *ue != '"') ue++;
+            size_t ul = ue - up; if (ul > 1023) ul = 1023;
+            memcpy(url, up, ul); url[ul] = '\0';
+            up = ue;
+        }
+        if (url[0] == '\0') continue;
+        /* Parse optional title in quotes */
+        char title[256] = "";
+        while (*up == ' ' || *up == '\t') up++;
+        if (*up == '"') {
+            up++;
+            const char* te = up;
+            while (*te && *te != '"') te++;
+            size_t tl = te - up; if (tl > 255) tl = 255;
+            memcpy(title, up, tl); title[tl] = '\0';
+        }
+        ref_add(label, url, title);
+        /* Mark this line as consumed by blanking it */
+        lines.lines[r][0] = '\0';
+    }
 
     while (i < lines.count) {
         const char* line = lines.lines[i];
@@ -532,6 +984,48 @@ static char* md_to_html(const char* markdown) {
             sb_append(&sb,ordered?"</ol>\n":"</ul>\n"); continue;
         }
 
+        /* Raw HTML blocks — pass through unescaped */
+        if (tr[0]=='<') {
+            /* Check for block-level HTML tags */
+            static const char* block_tags[] = {
+                "div","p","table","thead","tbody","tr","th","td","ul","ol","li",
+                "h1","h2","h3","h4","h5","h6","pre","blockquote","hr","br",
+                "section","article","aside","nav","header","footer","main",
+                "figure","figcaption","details","summary","dl","dt","dd",
+                "form","fieldset","input","textarea","select","button","label",
+                "video","audio","source","iframe","canvas","svg","img",
+                "style","script","!--", NULL
+            };
+            int is_html_block = 0;
+            for (int t=0; block_tags[t]; t++) {
+                size_t tl = strlen(block_tags[t]);
+                if (_strnicmp(tr+1, block_tags[t], tl)==0) {
+                    char after = tr[1+tl];
+                    if (after==' '||after=='>'||after=='\0'||after=='\n'||after=='/'||after=='\r') {
+                        is_html_block = 1; break;
+                    }
+                }
+                /* Also match closing tags like </div> at start of line */
+                if (tr[1]=='/' && _strnicmp(tr+2, block_tags[t], tl)==0) {
+                    char after = tr[2+tl];
+                    if (after=='>'||after=='\0'||after=='\n'||after==' ') {
+                        is_html_block = 1; break;
+                    }
+                }
+            }
+            if (is_html_block) {
+                /* Collect contiguous non-blank lines as raw HTML */
+                while (i < lines.count) {
+                    const char* hl = lines.lines[i];
+                    if (hl[0]=='\0') break;
+                    sb_append(&sb, hl);
+                    sb_append(&sb, "\n");
+                    i++;
+                }
+                continue;
+            }
+        }
+
         /* Paragraph */
         { StrBuf para; sb_init(&para);
             while(i<lines.count){
@@ -553,6 +1047,7 @@ static char* md_to_html(const char* markdown) {
         }
     }
     free_lines(&lines);
+    g_md_depth--;
     return sb.data;
 }
 
@@ -845,12 +1340,19 @@ static void build_js(StrBuf* sb) {
     "var m=ms[i],p=m.parentNode;p.replaceChild(document.createTextNode(m.innerText),m);p.normalize()}"
     "fm=[];fi=-1;document.getElementById('mdv-fc').innerText=''}"
 
-    "function df(txt){cf();if(!txt)return;var lo=txt.toLowerCase();"
-    "var ct=document.getElementById('mdv-ct');"
-    "var w=document.createTreeWalker(ct,4,null,false),ns=[];"
+    "function df(txt){cf();if(!txt)return;"
+    "var lo=txt.toLowerCase();"
+    "var ct=document.getElementById('mdv-ct');if(!ct)return;"
+    "var ns=[];try{"
+    "var w=document.createTreeWalker(ct,4,{acceptNode:function(n){return 1}},false);"
     "while(w.nextNode()){var n=w.currentNode;"
     "if(n.parentNode&&n.parentNode.tagName==='SCRIPT')continue;"
     "if(n.nodeValue&&n.nodeValue.toLowerCase().indexOf(lo)>=0)ns.push(n)}"
+    "}catch(ex){"
+    "var els=ct.getElementsByTagName('*');"
+    "for(var ei=0;ei<els.length;ei++){for(var ci=0;ci<els[ei].childNodes.length;ci++){"
+    "var cn=els[ei].childNodes[ci];"
+    "if(cn.nodeType===3&&cn.nodeValue&&cn.nodeValue.toLowerCase().indexOf(lo)>=0)ns.push(cn)}}}"
     "for(var ni=0;ni<ns.length;ni++){var nd=ns[ni],v=nd.nodeValue,f=document.createDocumentFragment(),"
     "idx=0,vl=v.toLowerCase(),pos;"
     "while((pos=vl.indexOf(lo,idx))>=0){"
@@ -861,7 +1363,12 @@ static void build_js(StrBuf* sb) {
     "fm=document.querySelectorAll('.hl');fi=fm.length>0?0:-1;ufh()}"
 
     "function ufh(){for(var i=0;i<fm.length;i++)fm[i].className='hl';"
-    "if(fi>=0&&fi<fm.length){fm[fi].className='hl hl-a';fm[fi].scrollIntoView()}"
+    "if(fi>=0&&fi<fm.length){fm[fi].className='hl hl-a';"
+    "var r=fm[fi].getBoundingClientRect();"
+    "var wh=window.innerHeight||document.documentElement.clientHeight;"
+    "var st=document.documentElement.scrollTop||document.body.scrollTop;"
+    "var target=st+r.top-Math.max(wh/3,60);"
+    "if(target<0)target=0;window.scrollTo(0,target)}"
     "var c=document.getElementById('mdv-fc');"
     "if(fm.length>0)c.innerText=(fi+1)+' of '+fm.length;"
     "else c.innerText=document.getElementById('mdv-fi').value?'No matches':''}"
@@ -869,8 +1376,17 @@ static void build_js(StrBuf* sb) {
     "function fn(){if(fm.length===0)return;fi=(fi+1)%fm.length;ufh()}"
     "function fp(){if(fm.length===0)return;fi=(fi-1+fm.length)%fm.length;ufh()}"
     "function sf(){var b=document.getElementById('mdv-fb');b.className='on';"
-    "var inp=document.getElementById('mdv-fi');inp.focus();inp.select()}"
-    "function hf(){document.getElementById('mdv-fb').className='';cf()}"
+    "var inp=document.getElementById('mdv-fi');inp.focus();inp.select();"
+    "mdvStartFind()}"
+    "function hf(){document.getElementById('mdv-fb').className='';cf();mdvStopFind()}"
+
+    /* Poll-based find: watches input value since MSHTML inline events are unreliable */
+    "var _fwt=null,_flv='';"
+    "function mdvStartFind(){mdvStopFind();_flv=document.getElementById('mdv-fi').value||'';"
+    "_fwt=setInterval(function(){"
+    "var inp=document.getElementById('mdv-fi');if(!inp)return;"
+    "var v=inp.value;if(v!==_flv){_flv=v;df(v)}},150)}"
+    "function mdvStopFind(){if(_fwt){clearInterval(_fwt);_fwt=null}}"
 
     /* Help */
     "function th(){var h=document.getElementById('mdv-help');h.className=h.className==='on'?'':'on'}"
@@ -970,15 +1486,11 @@ static void build_js(StrBuf* sb) {
     "if(k===112||(c&&k===191)){pd(e);th();return false}"
     "if(k===27){hf();document.getElementById('mdv-toc').className='';document.body.style.marginRight='0';"
     "document.getElementById('mdv-help').className='';return false}"
-    "if(k===13&&document.activeElement===document.getElementById('mdv-fi')){"
-    "pd(e);if(e.shiftKey)fp();else fn();return false}"
     "};"
 
     /* Init */
     "window.onload=function(){"
-    "var inp=document.getElementById('mdv-fi');if(inp){"
-    "inp.onkeyup=function(){var s=this;if(s._db)clearTimeout(s._db);"
-    "s._db=setTimeout(function(){df(s.value)},200)}}"
+    "shAll();initCollapse();"
     "shAll();initCollapse();"
     "if(ln)tl();"  /* apply line numbers if saved */
     "up()};"
@@ -1021,17 +1533,22 @@ static const char* get_ui(void) {
     "<div class=\"hrow\"><span>Go to top</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">G</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
+    "<div class=\"hrow\"><span>Copy</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">C</span></span></div>"
+    "<div class=\"hrow\"><span>Select all</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">A</span></span></div>"
+    "<div class=\"hrow\"><span>Split source view</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">M</span></span></div>"
+    "<div class=\"help-sep\"></div>"
+
     "<div class=\"hrow\"><span>Close viewer</span><span class=\"hkeys\"><span class=\"kc\">Esc</span></span></div>"
     "<div class=\"hrow\"><span>This help</span><span class=\"hkeys\"><span class=\"kc\">F1</span></span></div>"
 
-    "<div class=\"help-foot\">MDView v2.1 &middot; Settings auto-saved &middot; Press Esc to close</div>"
+    "<div class=\"help-foot\">MDView v2.3 &middot; Settings auto-saved &middot; Press Esc to close</div>"
     "</div>";
 }
 
 /* ── File Reading ────────────────────────────────────────────────────── */
 
-static char* read_file_utf8(const char* fn) {
-    FILE* f=fopen(fn,"rb"); if(!f)return NULL;
+static char* read_file_w(const WCHAR* fn) {
+    FILE* f=_wfopen(fn,L"rb"); if(!f)return NULL;
     fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
     char* buf=(char*)malloc(sz+1); if(!buf){fclose(f);return NULL;}
     fread(buf,1,sz,f); buf[sz]='\0'; fclose(f);
@@ -1063,7 +1580,45 @@ static HRESULT create_browser(HWND hwnd, IWebBrowser2** ppB, IOleObject** ppO, S
     *ppB=pB; *ppO=pO; return S_OK;
 }
 
-static void navigate_to_html(IWebBrowser2* pB, const char* html) {
+static void navigate_to_html(IWebBrowser2* pB, const char* html, const WCHAR* dir, WCHAR* outTempPath) {
+    outTempPath[0] = 0;
+
+    /* Write HTML to a temp file in the same directory as the .md file.
+       This makes MSHTML load in the Local Machine zone so file:// images work. */
+    WCHAR tempPath[MAX_PATH];
+    wcscpy(tempPath, dir);
+    /* Append a unique temp filename */
+    WCHAR tempName[64];
+    wsprintfW(tempName, L"_mdview_%08x.html", GetTickCount());
+    wcscat(tempPath, tempName);
+
+    /* Write UTF-8 HTML with BOM and Mark of the Web */
+    FILE* tf = _wfopen(tempPath, L"wb");
+    if (tf) {
+        /* UTF-8 BOM */
+        fputc(0xEF, tf); fputc(0xBB, tf); fputc(0xBF, tf);
+        /* Mark of the Web — tells MSHTML to allow script execution in local files */
+        fprintf(tf, "<!-- saved from url=(0016)http://localhost -->\r\n");
+        fwrite(html, 1, strlen(html), tf);
+        fclose(tf);
+        wcscpy(outTempPath, tempPath);
+
+        /* Navigate to the temp file */
+        VARIANT ve; VariantInit(&ve);
+        BSTR url = SysAllocString(tempPath);
+        IWebBrowser2_Navigate(pB, url, &ve, &ve, &ve, &ve);
+        SysFreeString(url);
+
+        /* Wait for load */
+        READYSTATE rs; int to = 200;
+        do { MSG msg; while(PeekMessageW(&msg,NULL,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
+            IWebBrowser2_get_ReadyState(pB,&rs);
+            if(rs!=READYSTATE_COMPLETE) Sleep(10);
+        } while(rs!=READYSTATE_COMPLETE && --to>0);
+        return;
+    }
+
+    /* Fallback: about:blank + document.write (no local image support) */
     VARIANT ve; VariantInit(&ve);
     BSTR url=SysAllocString(L"about:blank");
     IWebBrowser2_Navigate(pB,url,&ve,&ve,&ve,&ve); SysFreeString(url);
@@ -1132,32 +1687,13 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
     MDViewData* d=(MDViewData*)GetWindowLongPtrW(hwnd,GWLP_USERDATA);
     switch(msg){
     case WM_SIZE:
-        if(d&&d->pBrowser){
-            RECT rc; GetClientRect(hwnd,&rc);
-            /* Resize via IWebBrowser2 */
-            IWebBrowser2_put_Left(d->pBrowser, 0);
-            IWebBrowser2_put_Top(d->pBrowser, 0);
-            IWebBrowser2_put_Width(d->pBrowser, rc.right);
-            IWebBrowser2_put_Height(d->pBrowser, rc.bottom);
-            /* Also resize via IOleInPlaceObject for OLE containers that need it */
-            if(d->pOleObj){
-                IOleInPlaceObject* pIPO = NULL;
-                IOleObject_QueryInterface(d->pOleObj, &IID_IOleInPlaceObject, (void**)&pIPO);
-                if(pIPO){
-                    IOleInPlaceObject_SetObjectRects(pIPO, &rc, &rc);
-                    IOleInPlaceObject_Release(pIPO);
-                }
-            }
-            /* Force all child windows to match our size */
-            HWND child = GetWindow(hwnd, GW_CHILD);
-            while(child){
-                MoveWindow(child, 0, 0, rc.right, rc.bottom, TRUE);
-                child = GetWindow(child, GW_CHILD);
-            }
-        }
+        if (d && d->pBrowser) layout_views(d);
         return 0;
     case WM_SETFOCUS:
-        if(d&&d->hwndIEServer) SetFocus(d->hwndIEServer);
+        if (d) {
+            if (d->hwndIEServer) SetFocus(d->hwndIEServer);
+            else if (d->hwndText) SetFocus(d->hwndText);
+        }
         return 0;
     case WM_DESTROY:
         if(d){
@@ -1167,8 +1703,19 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
                 SetWindowLongPtrW(d->hwndIEServer, GWLP_WNDPROC, (LONG_PTR)d->origIEProc);
                 RemovePropW(d->hwndIEServer, L"MDViewData");
             }
+            /* Clean up split view (contributed by Nigurrath) */
+            if (d->hwndText && d->origTextProc) {
+                SetWindowLongPtrW(d->hwndText, GWLP_WNDPROC, (LONG_PTR)d->origTextProc);
+                RemovePropW(d->hwndText, L"MDViewData");
+                DestroyWindow(d->hwndText); d->hwndText = NULL;
+            }
+            if (d->hTextFont && d->hTextFont != (HFONT)GetStockObject(DEFAULT_GUI_FONT))
+                DeleteObject(d->hTextFont);
+            if (d->mdUtf8) { free(d->mdUtf8); d->mdUtf8 = NULL; }
             if(d->pBrowser) IWebBrowser2_Release(d->pBrowser);
             if(d->pOleObj){ IOleObject_Close(d->pOleObj,OLECLOSE_NOSAVE); IOleObject_Release(d->pOleObj); }
+            /* Clean up temp HTML file */
+            if(d->tempFile[0]) DeleteFileW(d->tempFile);
             free(d); SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);
         }
         return 0;
@@ -1201,7 +1748,7 @@ static void ensure_ie11_emulation(void) {
 
 /* ── TC Lister Plugin Exports ────────────────────────────────────────── */
 
-__declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
+__declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) {
     ensure_ie11_emulation();
     load_settings();
 
@@ -1211,8 +1758,9 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
         RegisterClassExW(&wc); g_classRegistered=1;
     }
 
-    char* md=read_file_utf8(file); if(!md)return NULL;
-    char* body=md_to_html(md); free(md); if(!body)return NULL;
+    char* md=read_file_w(file); if(!md)return NULL;
+    char* body=md_to_html(md);
+    if(!body){ free(md); return NULL; }
 
     /* Determine theme: saved preference, or auto-detect */
     int dark = (g_settings.isDark >= 0) ? g_settings.isDark : is_dark_theme();
@@ -1222,33 +1770,43 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
     StrBuf jsBuf;  sb_init(&jsBuf);  build_js(&jsBuf);
     const char* ui = get_ui();
 
-    size_t fl=strlen(body)+cssBuf.len+jsBuf.len+strlen(ui)+1024;
+    size_t fl=strlen(body)+cssBuf.len+jsBuf.len+strlen(ui)+2048;
     char* full=(char*)malloc(fl);
     snprintf(full,fl,
         "<!DOCTYPE html><html%s><head>"
         "<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">"
         "<meta charset=\"utf-8\"><style>%s</style></head><body%s>"
-        "%s<div id=\"mdv-ct\">%s</div>%s</body></html>",
-        dark?" style=\"background:#1e1e1e\"":"", cssBuf.data, dark?" class=\"dark\"":"", ui, body, jsBuf.data);
+        "%s%s<div id=\"mdv-ct\">%s</div></body></html>",
+        dark?" style=\"background:#1e1e1e\"":"", cssBuf.data, dark?" class=\"dark\"":"", jsBuf.data, ui, body);
     free(body); free(cssBuf.data); free(jsBuf.data);
 
     RECT rc; GetClientRect(pw,&rc);
     HWND hwnd=CreateWindowExW(0,CLASS_NAME,L"MDView",
         WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN,0,0,rc.right,rc.bottom,pw,NULL,g_hInstance,NULL);
-    if(!hwnd){free(full);return NULL;}
+    if(!hwnd){free(full);free(md);return NULL;}
 
     OleInitialize(NULL);
     MDViewData* data=(MDViewData*)calloc(1,sizeof(MDViewData));
+    data->hwndContainer = hwnd;
+    data->mdUtf8 = md; /* Keep raw markdown for split view (contributed by Nigurrath) */
     SetWindowLongPtrW(hwnd,GWLP_USERDATA,(LONG_PTR)data);
 
     SiteImpl* site=NULL;
     HRESULT hr=create_browser(hwnd,&data->pBrowser,&data->pOleObj,&site);
-    if(FAILED(hr)){free(data);free(full);DestroyWindow(hwnd);return NULL;}
+    if(FAILED(hr)){free(data->mdUtf8);free(data);free(full);DestroyWindow(hwnd);return NULL;}
 
-    IWebBrowser2_put_Left(data->pBrowser,0); IWebBrowser2_put_Top(data->pBrowser,0);
-    IWebBrowser2_put_Width(data->pBrowser,rc.right); IWebBrowser2_put_Height(data->pBrowser,rc.bottom);
+    layout_views(data);
     IWebBrowser2_put_Silent(data->pBrowser, VARIANT_TRUE);
-    navigate_to_html(data->pBrowser,full); free(full);
+
+    /* Extract directory from file path for temp file placement */
+    WCHAR fileDir[MAX_PATH];
+    wcsncpy(fileDir, file, MAX_PATH); fileDir[MAX_PATH-1]=0;
+    WCHAR* lastSep = wcsrchr(fileDir, L'\\');
+    if (!lastSep) lastSep = wcsrchr(fileDir, L'/');
+    if (lastSep) lastSep[1] = 0; else { fileDir[0]=L'.'; fileDir[1]=L'\\'; fileDir[2]=0; }
+
+    navigate_to_html(data->pBrowser, full, fileDir, data->tempFile);
+    free(full);
 
     IOleObject_DoVerb(data->pOleObj, OLEIVERB_UIACTIVATE, NULL,
                       (IOleClientSite*)&site->clientSite, 0, hwnd, &rc);
@@ -1268,10 +1826,12 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
     return hwnd;
 }
 
-__declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) {
-    int len=WideCharToMultiByte(CP_UTF8,0,file,-1,NULL,0,NULL,NULL);
-    char* u=(char*)malloc(len); WideCharToMultiByte(CP_UTF8,0,file,-1,u,len,NULL,NULL);
-    HWND r=ListLoad(pw,u,flags); free(u); return r;
+__declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
+    /* Convert ANSI path to wide and delegate to ListLoadW */
+    int len=MultiByteToWideChar(CP_ACP,0,file,-1,NULL,0);
+    WCHAR* w=(WCHAR*)malloc(len*sizeof(WCHAR));
+    MultiByteToWideChar(CP_ACP,0,file,-1,w,len);
+    HWND r=ListLoadW(pw,w,flags); free(w); return r;
 }
 
 __declspec(dllexport) void __stdcall ListCloseWindow(HWND w) { DestroyWindow(w); }
@@ -1280,7 +1840,40 @@ __declspec(dllexport) void __stdcall ListGetDetectString(char* ds, int mx) {
     strncpy(ds,"EXT=\"MD\" | EXT=\"MARKDOWN\" | EXT=\"MKD\" | EXT=\"MKDN\"",mx-1); ds[mx-1]='\0';
 }
 
-__declspec(dllexport) int __stdcall ListSearchText(HWND w, int p, char* s) { return LISTPLUGIN_ERROR; }
+__declspec(dllexport) int __stdcall ListSearchText(HWND w, int p, char* s) {
+    /* TC Lister search: p&1=find first, p&2=find next, p&4=backwards */
+    if (!s || !s[0]) return LISTPLUGIN_ERROR;
+    MDViewData* d = (MDViewData*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    if (!d || !d->pBrowser) return LISTPLUGIN_ERROR;
+
+    /* Use our JS find infrastructure: on first search populate, then navigate */
+    int wl = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    wchar_t* ws = (wchar_t*)malloc(wl * sizeof(wchar_t));
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, ws, wl);
+
+    /* Escape single quotes in search term */
+    wchar_t escaped[512]; int ei = 0;
+    for (int i = 0; ws[i] && ei < 500; i++) {
+        if (ws[i] == L'\'') { escaped[ei++] = L'\\'; escaped[ei++] = L'\''; }
+        else if (ws[i] == L'\\') { escaped[ei++] = L'\\'; escaped[ei++] = L'\\'; }
+        else escaped[ei++] = ws[i];
+    }
+    escaped[ei] = 0;
+    free(ws);
+
+    wchar_t js[1024];
+    if (p & 1) {
+        /* First search: populate matches */
+        swprintf(js, 1024, L"df('%ls')", escaped);
+        exec_js(d->pBrowser, js);
+    } else {
+        /* Next/prev */
+        if (p & 4) exec_js(d->pBrowser, L"fp()");
+        else exec_js(d->pBrowser, L"fn()");
+    }
+
+    return LISTPLUGIN_OK;
+}
 __declspec(dllexport) int __stdcall ListSendCommand(HWND w, int c, int p) { return LISTPLUGIN_OK; }
 
 __declspec(dllexport) void __stdcall ListSetDefaultParams(ListDefaultParamStruct* p) {

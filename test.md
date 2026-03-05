@@ -226,3 +226,44 @@ if (validateInput(testData)) {
 ---
 
 *End of test document. Try the keyboard shortcuts!*
+
+## Embedded HTML
+
+Raw HTML blocks should render natively:
+
+<div style="background:#e8f4fd;border:1px solid #bee5eb;border-radius:8px;padding:16px;margin:12px 0">
+  <strong>Info Box:</strong> This is a raw HTML div with inline styles. It should render as a styled callout box, not as escaped text.
+</div>
+
+<details>
+<summary>Click to expand</summary>
+<p>This content is inside a native HTML <code>&lt;details&gt;</code> element. It should be collapsible.</p>
+<ul>
+<li>Item one</li>
+<li>Item two</li>
+<li>Item three</li>
+</ul>
+</details>
+
+Inline HTML also works: this has a <mark>highlighted word</mark> and a <kbd>keyboard key</kbd> and an <abbr title="HyperText Markup Language">HTML</abbr> abbreviation.
+
+<table style="border:2px solid #333">
+<tr><th style="background:#ffd700;padding:8px">Custom</th><th style="background:#ffd700;padding:8px">HTML Table</th></tr>
+<tr><td style="padding:8px">With inline</td><td style="padding:8px">styles applied</td></tr>
+</table>
+
+
+## Reference-Style Links and Images
+
+This is a reference-style link to [Markdown Guide][md-guide].
+
+This is a reference-style image:
+
+![Placeholder][sample-img]
+
+This is an implicit reference link to [Google].
+
+[md-guide]: https://www.markdownguide.org "Official Markdown Guide"
+[sample-img]: https://placehold.co/200x100.png "A test placeholder"
+[Google]: https://www.google.com "Google Search"
+
