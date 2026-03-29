@@ -28,7 +28,7 @@ v 2.4
 - add: built-in Mermaid rendering for stateDiagram-v2 diagrams
 - add: Mermaid diagrams are rendered self-contained inside the WLX/WLX64 binaries
 - add: Mermaid diagram typography follows the active viewer font size and font family
-- add: test_mermaid.md contains a dedicated sample set for all Mermaid diagram types currently supported
+- add: test_mermaid.md and test_mermaid_stress.md contain two dedicated samples set for all Mermaid diagram types currently supported
 - fix: Mermaid SVG sizing now stays visually consistent with the surrounding Markdown layout
 - fix: Mermaid typography is now applied centrally so supported diagram types use the active viewer font size and font family more consistently
 - fix: sequenceDiagram parsing now handles arrow operators such as -->> correctly without creating malformed participant names
