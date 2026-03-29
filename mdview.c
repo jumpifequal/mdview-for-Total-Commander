@@ -1,5 +1,5 @@
 /*
- * MDView v2.3 - Total Commander Lister Plugin for Markdown
+ * MDView v2.1 - Total Commander Lister Plugin for Markdown
  * =========================================================
  * Lightweight WLX plugin: built-in Markdown->HTML, embedded MSHTML, zero deps.
  *
@@ -10,27 +10,30 @@
  *   Ctrl+F             Find in page with highlighting
  *   Ctrl+P             Print document
  *   Ctrl+G             Go to top
- *   Ctrl+C             Copy (HTML from rendered view, raw text from source view)
- *   Ctrl+A             Select all
- *   Ctrl+L             Toggle line numbers
- *   Ctrl+W / Shift+W   Constrain / widen column width
- *   Ctrl+M             Toggle split view (rendered + raw source side by side)
+ *   Ctrl+A             Select all text in the active view
+ *   Ctrl+C             Copy text to clipboard (HTML if focus is in rendered view, raw markdown if focus is in text view)
  *   Escape             Close find bar / TOC / help
+ *   Ctrl+M             Toggle split view (Markdown render + raw text side by side)
  *   F1                 Show keyboard shortcuts help
- *
- * Split view with synchronised scrolling contributed by Nigurrath
- * (Senior Ghisler.ch Total Commander Forum member).
+ *   CTRL-F             Find in page (with highlighting)
+ *   Shift+F3           Find in page (reverse)
+ *   F3				    Find next
  *
  * (c) 2026 - MIT License
  */
 
+#define _CRT_SECURE_NO_WARNINGS //avoid warnings for fopen, sprintf, etc.
 #define COBJMACROS
-#define UNICODE
-#define _UNICODE
-#define WIN32_LEAN_AND_MEAN
-#define _WIN32_WINNT 0x0600
+#ifndef UNICODE
+    #define UNICODE
+#endif
+#ifndef _UNICODE
+    #define _UNICODE
+#endif _UNICODE
 
-/* Split view raw pane font (contributed by Nigurrath) */
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0501
+
 #define MDVIEW_RAW_FONT_NAME L"Cascadia Mono"
 #define MDVIEW_RAW_FONT_PT   11
 
@@ -41,6 +44,7 @@
 #include <exdisp.h>
 #include <mshtml.h>
 #include <mshtmhst.h>
+#include <docobj.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,10 +64,10 @@ typedef struct {
 } ListDefaultParamStruct;
 
 static LRESULT CALLBACK ContainerWndProc(HWND, UINT, WPARAM, LPARAM);
-static char* read_file_w(const WCHAR*);
+static char* read_file_utf8(const char*);
 static char* md_to_html(const char*);
 static int   is_dark_theme(void);
-static void  navigate_to_html(IWebBrowser2*, const char*, const WCHAR*, WCHAR*);
+static void  navigate_to_html(IWebBrowser2*, const char*);
 
 static const wchar_t CLASS_NAME[] = L"MDViewWLXContainer";
 static HINSTANCE g_hInstance = NULL;
@@ -74,18 +78,148 @@ typedef struct {
     IOleObject*   pOleObj;
     HWND          hwndIEServer;  /* The actual IE rendering window */
     WNDPROC       origIEProc;    /* Original wndproc of IE Server */
-    WCHAR         tempFile[MAX_PATH]; /* Temp HTML file for local resource loading */
-    /* Split view fields (contributed by Nigurrath) */
     HWND          hwndContainer; /* Our container window */
     HWND          hwndText;      /* Raw text view (RichEdit), optional */
     WNDPROC       origTextProc;  /* Subclass of raw text control */
     HFONT         hTextFont;     /* Font for raw text view */
-    int           splitView;     /* 0 = normal, 1 = split */
-    int           syncGuard;     /* Recursion guard for scroll sync */
-    char*         mdUtf8;        /* Raw markdown (UTF-8), owned */
+    int           splitView;     /* 0/1 */
+    int           syncGuard;     /* recursion guard for scroll sync */
+    char*         mdUtf8;        /* raw markdown (UTF-8), owned */
 } MDViewData;
 
+/* ── INI Settings Persistence ────────────────────────────────────────── */
+
+static char g_iniPath[MAX_PATH] = { 0 };
+
+typedef struct {
+    int fontSize;    /* 9-30, default 19 */
+    int isDark;      /* 0 or 1, -1 = auto */
+    int maxWidth;    /* column width in px, 0 = no limit, default 0 */
+    int lineNums;    /* 0 or 1 */
+    int rawFontSize; /* raw text font size */
+    wchar_t rawFontName[64]; /* raw text font name */
+} MDVSettings;
+
+static MDVSettings g_settings = { 19, -1, 960, 0, MDVIEW_RAW_FONT_PT, MDVIEW_RAW_FONT_NAME };
+
+static void load_settings(void) {
+    if (!g_iniPath[0]) return;
+    g_settings.fontSize = GetPrivateProfileIntA("MDView", "FontSize", 19, g_iniPath);
+    g_settings.isDark = GetPrivateProfileIntA("MDView", "DarkMode", -1, g_iniPath);
+    g_settings.maxWidth = GetPrivateProfileIntA("MDView", "MaxWidth", 0, g_iniPath);
+    g_settings.lineNums = GetPrivateProfileIntA("MDView", "LineNumbers", 0, g_iniPath);
+    g_settings.rawFontSize = GetPrivateProfileIntA("MDView", "RawFontSize", MDVIEW_RAW_FONT_PT, g_iniPath);
+    char fontNameA[64];
+    GetPrivateProfileStringA("MDView", "RawFontName", "Cascadia Mono", fontNameA, sizeof(fontNameA), g_iniPath);
+    MultiByteToWideChar(CP_ACP, 0, fontNameA, -1, g_settings.rawFontName, 64);
+
+    /* Clamp */
+    if (g_settings.fontSize < 9) g_settings.fontSize = 9;
+    if (g_settings.fontSize > 30) g_settings.fontSize = 30;
+    if (g_settings.maxWidth != 0 && g_settings.maxWidth < 400) g_settings.maxWidth = 400;
+    if (g_settings.maxWidth > 9999) g_settings.maxWidth = 9999;
+    if (g_settings.rawFontSize < 6 || g_settings.rawFontSize > 72) g_settings.rawFontSize = MDVIEW_RAW_FONT_PT;
+}
+
+static void save_setting_int(const char* key, int val) {
+    if (!g_iniPath[0]) return;
+    char buf[16]; _snprintf(buf, sizeof(buf), "%d", val);
+    WritePrivateProfileStringA("MDView", key, buf, g_iniPath);
+}
+
+static void save_setting_str(const char* key, const wchar_t* val) {
+    if (!g_iniPath[0]) return;
+    char buf[64];
+    WideCharToMultiByte(CP_ACP, 0, val, -1, buf, sizeof(buf), NULL, NULL);
+    WritePrivateProfileStringA("MDView", key, buf, g_iniPath);
+}
+
 /* Execute JavaScript on the browser document */
+
+/* ── OLE command helper (copy/paste) ─────────────────────────────────── */
+
+static void browser_exec_olecmd(IWebBrowser2* pBrowser, OLECMDID cmd) {
+    if (!pBrowser) return;
+
+    IDispatch* pDispDoc = NULL;
+    if (FAILED(pBrowser->lpVtbl->get_Document(pBrowser, &pDispDoc)) || !pDispDoc) return;
+
+    IOleCommandTarget* pCmd = NULL;
+    if (SUCCEEDED(pDispDoc->lpVtbl->QueryInterface(pDispDoc, &IID_IOleCommandTarget, (void**)&pCmd)) && pCmd) {
+        /* MSHTML generally accepts OLECMDIDs with NULL command group */
+        pCmd->lpVtbl->Exec(pCmd, NULL, cmd, OLECMDEXECOPT_DODEFAULT, NULL, NULL);
+        pCmd->lpVtbl->Release(pCmd);
+    }
+    pDispDoc->lpVtbl->Release(pDispDoc);
+}
+
+
+static void browser_execwb(IWebBrowser2* pBrowser, OLECMDID cmd) {
+    if (!pBrowser) return;
+    /* ExecWB is the most reliable way to get MSHTML to place CF_HTML + text on the clipboard (Copy),
+       and to invoke the built-in paste behaviour (Paste). */
+    IWebBrowser2_ExecWB(pBrowser, cmd, OLECMDEXECOPT_DODEFAULT, NULL, NULL);
+}
+
+static int is_child_of(HWND child, HWND parent) {
+    while (child) {
+        if (child == parent) return 1;
+        child = GetParent(child);
+    }
+    return 0;
+}
+
+/* Ctrl+C behaviour:
+   - if focus is in raw view: copy raw markdown (plain text)
+   - if focus is in rendered view: copy formatted selection (HTML + text) */
+static void do_copy(MDViewData* d) {
+    if (!d) return;
+    HWND f = GetFocus();
+
+    if (d->hwndText && (f == d->hwndText || is_child_of(f, d->hwndText))) {
+        SendMessageW(d->hwndText, WM_COPY, 0, 0);
+        return;
+    }
+    if (d->pBrowser) {
+        browser_execwb(d->pBrowser, OLECMDID_COPY);
+    }
+}
+
+/* Ctrl+A behaviour:
+   - if focus is in raw view: select all raw markdown
+   - if focus is in rendered view: select all rendered content */
+static void do_select_all(MDViewData* d) {
+    if (!d) return;
+    HWND f = GetFocus();
+
+    if (d->hwndText && (f == d->hwndText || is_child_of(f, d->hwndText))) {
+        SendMessageW(d->hwndText, EM_SETSEL, 0, -1);
+        return;
+    }
+    if (d->pBrowser) {
+        browser_execwb(d->pBrowser, OLECMDID_SELECTALL);
+    }
+}
+
+/* Context menu command IDs */
+enum {
+    IDM_ZOOM_IN = 1001,
+    IDM_ZOOM_OUT,
+    IDM_ZOOM_RESET,
+    IDM_TOGGLE_DARK,
+    IDM_TOGGLE_TOC,
+    IDM_SEARCH,
+    IDM_PRINT,
+    IDM_TOP,
+    IDM_TOGGLE_LINEWRAP,
+    IDM_WIDTH_TOGGLE,
+    IDM_WIDTH_NORMAL,
+    IDM_HELP,
+    IDM_COPY,
+    IDM_PASTE,
+    IDM_TOGGLE_SPLIT
+};
+
 static void exec_js(IWebBrowser2* pB, const wchar_t* code) {
     if (!pB) return;
     IDispatch* pDisp = NULL;
@@ -109,156 +243,7 @@ static void exec_js(IWebBrowser2* pB, const wchar_t* code) {
     IHTMLWindow2_Release(pWin);
 }
 
-/* ── OLE clipboard helpers (contributed by Nigurrath) ────────────────── */
-
-static void browser_execwb(IWebBrowser2* pBrowser, OLECMDID cmd) {
-    if (!pBrowser) return;
-    IWebBrowser2_ExecWB(pBrowser, cmd, OLECMDEXECOPT_DODEFAULT, NULL, NULL);
-}
-
-static int is_child_of(HWND child, HWND parent) {
-    while (child) { if (child == parent) return 1; child = GetParent(child); }
-    return 0;
-}
-
-/* Context-aware copy: HTML from rendered view, raw markdown from source view */
-static void do_copy(MDViewData* d) {
-    if (!d) return;
-    HWND f = GetFocus();
-    if (d->hwndText && (f == d->hwndText || is_child_of(f, d->hwndText))) {
-        SendMessageW(d->hwndText, WM_COPY, 0, 0);
-        return;
-    }
-    if (d->pBrowser) browser_execwb(d->pBrowser, OLECMDID_COPY);
-}
-
-static int get_document_title_utf8(IWebBrowser2* pB, char* out, int outsz) {
-    if (!pB || !out || outsz <= 0) return 0;
-    out[0] = '\0';
-    IDispatch* pDisp = NULL;
-    IWebBrowser2_get_Document(pB, &pDisp);
-    if (!pDisp) return 0;
-    IHTMLDocument2* pDoc = NULL;
-    IDispatch_QueryInterface(pDisp, &IID_IHTMLDocument2, (void**)&pDoc);
-    IDispatch_Release(pDisp);
-    if (!pDoc) return 0;
-    BSTR bTitle = NULL;
-    IHTMLDocument2_get_title(pDoc, &bTitle);
-    IHTMLDocument2_Release(pDoc);
-    if (!bTitle) return 0;
-    WideCharToMultiByte(CP_UTF8, 0, bTitle, -1, out, outsz, NULL, NULL);
-    SysFreeString(bTitle);
-    return 1;
-}
-
-/* ── Split view scroll synchronisation (contributed by Nigurrath) ────── */
-
-static double get_html_scroll_ratio(MDViewData* d) {
-    if (!d || !d->pBrowser) return 0.0;
-    exec_js(d->pBrowser,
-        L"(function(){var de=document.documentElement,b=document.body;"
-        L"var st=(de&&de.scrollTop)||(b&&b.scrollTop)||0;"
-        L"var sh=Math.max((de&&de.scrollHeight)||0,(b&&b.scrollHeight)||0);"
-        L"var ih=window.innerHeight||(de&&de.clientHeight)||0;"
-        L"document.title=''+st+','+sh+','+ih;})();");
-    char t[128];
-    if (!get_document_title_utf8(d->pBrowser, t, (int)sizeof(t))) return 0.0;
-    double st=0, sh=0, ih=0;
-    if (sscanf(t, "%lf,%lf,%lf", &st, &sh, &ih) != 3) return 0.0;
-    double denom = sh - ih;
-    if (denom < 1.0) denom = 1.0;
-    double r = st / denom;
-    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
-    return r;
-}
-
-static void set_html_scroll_ratio(MDViewData* d, double r) {
-    if (!d || !d->pBrowser) return;
-    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
-    wchar_t js[256];
-    swprintf(js, 256,
-        L"(function(){var de=document.documentElement,b=document.body;"
-        L"var sh=Math.max((de&&de.scrollHeight)||0,(b&&b.scrollHeight)||0);"
-        L"var ih=window.innerHeight||(de&&de.clientHeight)||0;"
-        L"var y=(sh-ih)*%.6f; if(y<0)y=0; window.scrollTo(0,y);})();", r);
-    exec_js(d->pBrowser, js);
-}
-
-static double get_edit_scroll_ratio(HWND hEdit) {
-    if (!hEdit) return 0.0;
-    SCROLLINFO si; ZeroMemory(&si, sizeof(si));
-    si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    if (!GetScrollInfo(hEdit, SB_VERT, &si)) return 0.0;
-    int maxPos = (int)si.nMax - (int)si.nPage + 1;
-    if (maxPos < 1) return 0.0;
-    double r = (double)si.nPos / (double)maxPos;
-    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
-    return r;
-}
-
-static void set_edit_scroll_ratio(HWND hEdit, double r) {
-    if (!hEdit) return;
-    if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
-    SCROLLINFO si; ZeroMemory(&si, sizeof(si));
-    si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    if (!GetScrollInfo(hEdit, SB_VERT, &si)) return;
-    int maxPos = (int)si.nMax - (int)si.nPage + 1;
-    if (maxPos < 1) return;
-    int target = (int)((double)maxPos * r + 0.5);
-    if (target < 0) target = 0; if (target > maxPos) target = maxPos;
-    SendMessageW(hEdit, WM_VSCROLL, MAKEWPARAM(SB_THUMBPOSITION, target), 0);
-    SendMessageW(hEdit, WM_VSCROLL, MAKEWPARAM(SB_THUMBTRACK, target), 0);
-}
-
-static void sync_html_to_edit(MDViewData* d) {
-    if (!d || !d->splitView || !d->hwndText || d->syncGuard) return;
-    d->syncGuard = 1;
-    set_edit_scroll_ratio(d->hwndText, get_html_scroll_ratio(d));
-    d->syncGuard = 0;
-}
-
-static void sync_edit_to_html(MDViewData* d) {
-    if (!d || !d->splitView || !d->hwndText || d->syncGuard) return;
-    d->syncGuard = 1;
-    set_html_scroll_ratio(d, get_edit_scroll_ratio(d->hwndText));
-    d->syncGuard = 0;
-}
-
-/* ── Split view layout (contributed by Nigurrath) ────────────────────── */
-
-static void layout_views(MDViewData* d) {
-    if (!d || !d->hwndContainer || !d->pBrowser) return;
-    RECT rc; GetClientRect(d->hwndContainer, &rc);
-    int w = rc.right, h = rc.bottom;
-    int leftW = w, rightW = 0;
-    if (d->splitView && d->hwndText) {
-        leftW = w / 2; rightW = w - leftW;
-        if (leftW < 50) leftW = 50; if (rightW < 50) rightW = 50;
-    }
-    IWebBrowser2_put_Left(d->pBrowser, 0); IWebBrowser2_put_Top(d->pBrowser, 0);
-    IWebBrowser2_put_Width(d->pBrowser, leftW); IWebBrowser2_put_Height(d->pBrowser, h);
-    if (d->pOleObj) {
-        IOleInPlaceObject* pIPO = NULL;
-        IOleObject_QueryInterface(d->pOleObj, &IID_IOleInPlaceObject, (void**)&pIPO);
-        if (pIPO) {
-            RECT rB = { 0, 0, leftW, h };
-            IOleInPlaceObject_SetObjectRects(pIPO, &rB, &rB);
-            IOleInPlaceObject_Release(pIPO);
-        }
-    }
-    HWND child = GetWindow(d->hwndContainer, GW_CHILD);
-    while (child) {
-        if (child == d->hwndText) {
-            if (d->splitView) { ShowWindow(child, SW_SHOW); MoveWindow(child, leftW, 0, rightW, h, TRUE); }
-            else ShowWindow(child, SW_HIDE);
-        } else MoveWindow(child, 0, 0, leftW, h, TRUE);
-        child = GetWindow(child, GW_HWNDNEXT);
-    }
-}
-
-static void toggle_split_view(MDViewData* d);
-
-/* ── RichEdit subclass for raw text pane (contributed by Nigurrath) ──── */
+static void show_context_menu(MDViewData* d, HWND hwnd, int x, int y);
 
 static wchar_t* utf8_to_wide_dup(const char* s) {
     if (!s) return NULL;
@@ -270,50 +255,292 @@ static wchar_t* utf8_to_wide_dup(const char* s) {
     return w;
 }
 
+static int get_document_title_utf8(IWebBrowser2* pB, char* out, int outsz) {
+    if (!pB || !out || outsz <= 0) return 0;
+    out[0] = '\0';
+
+    IDispatch* pDisp = NULL;
+    IWebBrowser2_get_Document(pB, &pDisp);
+    if (!pDisp) return 0;
+
+    IHTMLDocument2* pDoc = NULL;
+    IDispatch_QueryInterface(pDisp, &IID_IHTMLDocument2, (void**)&pDoc);
+    IDispatch_Release(pDisp);
+    if (!pDoc) return 0;
+
+    BSTR bTitle = NULL;
+    IHTMLDocument2_get_title(pDoc, &bTitle);
+    IHTMLDocument2_Release(pDoc);
+    if (!bTitle) return 0;
+
+    WideCharToMultiByte(CP_UTF8, 0, bTitle, -1, out, outsz, NULL, NULL);
+    SysFreeString(bTitle);
+    return 1;
+}
+
+static double get_html_scroll_ratio(MDViewData* d) {
+    if (!d || !d->pBrowser) return 0.0;
+
+    exec_js(d->pBrowser,
+        L"(function(){var de=document.documentElement,b=document.body;"
+        L"var st=(de&&de.scrollTop)|| (b&&b.scrollTop)||0;"
+        L"var sh=Math.max((de&&de.scrollHeight)||0,(b&&b.scrollHeight)||0);"
+        L"var ih=window.innerHeight|| (de&&de.clientHeight)||0;"
+        L"document.title=''+st+','+sh+','+ih;})();");
+
+    char t[128];
+    if (!get_document_title_utf8(d->pBrowser, t, (int)sizeof(t))) return 0.0;
+
+    double st=0, sh=0, ih=0;
+    if (sscanf_s(t, "%lf,%lf,%lf", &st, &sh, &ih) != 3) return 0.0;
+
+    double denom = sh - ih;
+    if (denom < 1.0) denom = 1.0;
+    double r = st / denom;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+    return r;
+}
+
+static void set_html_scroll_ratio(MDViewData* d, double r) {
+    if (!d || !d->pBrowser) return;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+
+    wchar_t js[256];
+    swprintf(js, 256,
+        L"(function(){var de=document.documentElement,b=document.body;"
+        L"var sh=Math.max((de&&de.scrollHeight)||0,(b&&b.scrollHeight)||0);"
+        L"var ih=window.innerHeight|| (de&&de.clientHeight)||0;"
+        L"var y=(sh-ih)*%.6f; if(y<0)y=0; window.scrollTo(0,y);})();", r);
+    exec_js(d->pBrowser, js);
+}
+
+/* ── RichEdit scroll ratio helpers (method 1: ratio-based sync) ───────── */
+
+static double get_edit_scroll_ratio(HWND hEdit) {
+    if (!hEdit) return 0.0;
+
+    SCROLLINFO si;
+    ZeroMemory(&si, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    if (!GetScrollInfo(hEdit, SB_VERT, &si)) return 0.0;
+
+    /* Max scroll position per Win32 semantics */
+    int maxPos = (int)si.nMax - (int)si.nPage + 1;
+    if (maxPos < 1) return 0.0;
+
+    double r = (double)si.nPos / (double)maxPos;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+    return r;
+}
+
+static void set_edit_scroll_ratio(HWND hEdit, double r) {
+    if (!hEdit) return;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+
+    SCROLLINFO si;
+    ZeroMemory(&si, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    if (!GetScrollInfo(hEdit, SB_VERT, &si)) return;
+
+    int maxPos = (int)si.nMax - (int)si.nPage + 1;
+    if (maxPos < 1) return;
+
+    int target = (int)((double)maxPos * r + 0.5);
+    if (target < 0) target = 0;
+    if (target > maxPos) target = maxPos;
+
+    /* Ask control to scroll to target position.
+       WM_VSCROLL with SB_THUMBPOSITION works reliably on RichEdit. */
+    SendMessageW(hEdit, WM_VSCROLL, MAKEWPARAM(SB_THUMBPOSITION, target), 0);
+    SendMessageW(hEdit, WM_VSCROLL, MAKEWPARAM(SB_THUMBTRACK, target), 0);
+}
+
+static void sync_html_to_edit(MDViewData* d) {
+    if (!d || !d->splitView || !d->hwndText) return;
+    if (d->syncGuard) return;
+    d->syncGuard = 1;
+
+    /* Ratio-based mapping: HTML scroll ratio -> RichEdit scroll ratio */
+    double r = get_html_scroll_ratio(d);
+    set_edit_scroll_ratio(d->hwndText, r);
+
+    d->syncGuard = 0;
+}
+
+static void sync_edit_to_html(MDViewData* d) {
+    if (!d || !d->splitView || !d->hwndText) return;
+    if (d->syncGuard) return;
+    d->syncGuard = 1;
+
+    /* Ratio-based mapping: RichEdit scroll ratio -> HTML scroll ratio */
+    double r = get_edit_scroll_ratio(d->hwndText);
+    set_html_scroll_ratio(d, r);
+
+    d->syncGuard = 0;
+}
+
+static void layout_views(MDViewData* d) {
+    if (!d || !d->hwndContainer || !d->pBrowser) return;
+
+    RECT rc; GetClientRect(d->hwndContainer, &rc);
+    int w = rc.right;
+    int h = rc.bottom;
+
+    int leftW = w;
+    int rightW = 0;
+
+    if (d->splitView && d->hwndText) {
+        leftW = w / 2;
+        rightW = w - leftW;
+        if (leftW < 50) leftW = 50;
+        if (rightW < 50) rightW = 50;
+    }
+
+    IWebBrowser2_put_Left(d->pBrowser, 0);
+    IWebBrowser2_put_Top(d->pBrowser, 0);
+    IWebBrowser2_put_Width(d->pBrowser, leftW);
+    IWebBrowser2_put_Height(d->pBrowser, h);
+
+    if (d->pOleObj) {
+        IOleInPlaceObject* pIPO = NULL;
+        IOleObject_QueryInterface(d->pOleObj, &IID_IOleInPlaceObject, (void**)&pIPO);
+        if (pIPO) {
+            RECT rB = { 0, 0, leftW, h };
+            IOleInPlaceObject_SetObjectRects(pIPO, &rB, &rB);
+            IOleInPlaceObject_Release(pIPO);
+        }
+    }
+
+    HWND child = GetWindow(d->hwndContainer, GW_CHILD);
+    while (child) {
+        if (child == d->hwndText) {
+            if (d->splitView) {
+                ShowWindow(child, SW_SHOW);
+                MoveWindow(child, leftW, 0, rightW, h, TRUE);
+            } else {
+                ShowWindow(child, SW_HIDE);
+            }
+        } else {
+            MoveWindow(child, 0, 0, leftW, h, TRUE);
+        }
+        child = GetWindow(child, GW_HWNDNEXT);
+    }
+}
+
+static void toggle_split_view(MDViewData* d);
+
 static LRESULT CALLBACK TextViewSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM lP) {
     MDViewData* d = (MDViewData*)GetPropW(hwnd, L"MDViewData");
     if (!d) return DefWindowProcW(hwnd, msg, wP, lP);
+
     if (msg == WM_KEYDOWN) {
         int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         if (ctrl) {
             if (wP == 'M') { toggle_split_view(d); return 0; }
-            if (wP == 'C') { SendMessageW(hwnd, WM_COPY, 0, 0); return 0; }
             if (wP == 'A') { SendMessageW(hwnd, EM_SETSEL, 0, -1); return 0; }
+            if (wP == 'C') { SendMessageW(hwnd, WM_COPY, 0, 0); return 0; }
+            if (wP == 'V') { SendMessageW(hwnd, WM_PASTE, 0, 0); return 0; }
+            if (wP == 'F') {
+                if (d->hwndIEServer) SetFocus(d->hwndIEServer);
+                if (d->pBrowser) exec_js(d->pBrowser, L"sf()");
+                return 0;
+            }
+        }
+
+        if (wP == VK_ESCAPE) {
+            HWND w = hwnd;
+            while (w) {
+                HWND p = GetParent(w);
+                if (!p) break;
+                w = p;
+            }
+            if (w) PostMessageW(w, WM_KEYDOWN, VK_ESCAPE, lP);
+            return 0;
+        }
+        
+        if (wP == VK_F3) {
+            if (d->hwndIEServer) SetFocus(d->hwndIEServer);
+            if (d->pBrowser) {
+                if (GetKeyState(VK_SHIFT) & 0x8000) 
+                    exec_js(d->pBrowser, L"fp()");
+                else 
+                    exec_js(d->pBrowser, L"fn()");
+            }
+            return 0;
         }
     }
-    if (msg == WM_CONTEXTMENU) return 0; /* Use main context menu */
+
+    if (msg == WM_CONTEXTMENU) {
+        int x = GET_X_LPARAM(lP);
+        int y = GET_Y_LPARAM(lP);
+        if (x == -1 && y == -1) {
+            POINT pt; GetCursorPos(&pt);
+            x = pt.x; y = pt.y;
+        }
+        show_context_menu(d, hwnd, x, y);
+        return 0;
+    }
+
     LRESULT r = CallWindowProcW(d->origTextProc, hwnd, msg, wP, lP);
+
     if (msg == WM_VSCROLL || msg == WM_MOUSEWHEEL ||
-        (msg == WM_KEYDOWN && (wP == VK_UP || wP == VK_DOWN || wP == VK_PRIOR || wP == VK_NEXT || wP == VK_HOME || wP == VK_END)))
+        (msg == WM_KEYDOWN && (wP == VK_UP || wP == VK_DOWN || wP == VK_PRIOR || wP == VK_NEXT || wP == VK_HOME || wP == VK_END))) {
         sync_edit_to_html(d);
+    }
+
     return r;
 }
 
 static void toggle_split_view(MDViewData* d) {
     if (!d || !d->hwndContainer) return;
+
     if (!d->splitView) {
         if (!d->hwndText) {
-            LoadLibraryW(L"Msftedit.dll");
-            HWND hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"RICHEDIT50W", L"",
-                WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|ES_NOHIDESEL,
-                0, 0, 0, 0, d->hwndContainer, NULL, g_hInstance, NULL);
+            /* Ensure RichEdit class is available */
+            /* Try RichEdit 4.1+ first, then fallback to 2.0/3.0 for XP compatibility */
+            const wchar_t* editClass = L"RichEdit50W";
+            if (!LoadLibraryW(L"Msftedit.dll")) {
+                LoadLibraryW(L"Riched20.dll");
+                editClass = L"RICHEDIT20W";
+            }
+
+            HWND hEdit = CreateWindowExW(
+                WS_EX_CLIENTEDGE, editClass, L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+                ES_MULTILINE | ES_AUTOVSCROLL |
+                ES_READONLY | ES_NOHIDESEL,
+                0, 0, 0, 0,
+                d->hwndContainer, NULL, g_hInstance, NULL);
+
             if (hEdit) {
                 d->hwndText = hEdit;
                 SetPropW(hEdit, L"MDViewData", (HANDLE)d);
                 d->origTextProc = (WNDPROC)SetWindowLongPtrW(hEdit, GWLP_WNDPROC, (LONG_PTR)TextViewSubclassProc);
-                if (!d->hTextFont) {
+
+                /* Monospace font for raw Markdown */
+                if (!d->hTextFont || d->hTextFont == (HFONT)GetStockObject(DEFAULT_GUI_FONT)) {
                     HDC hdc = GetDC(hEdit);
                     int dpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
                     if (hdc) ReleaseDC(hEdit, hdc);
-                    LOGFONTW lf = {0};
-                    lf.lfHeight = -MulDiv(MDVIEW_RAW_FONT_PT, dpiY, 72);
+
+                    LOGFONTW lf = { 0 };
+                    lf.lfHeight = -MulDiv(g_settings.rawFontSize, dpiY, 72);
                     lf.lfCharSet = DEFAULT_CHARSET;
-                    wcscpy(lf.lfFaceName, MDVIEW_RAW_FONT_NAME);
+                    wcsncpy_s(lf.lfFaceName, LF_FACESIZE, g_settings.rawFontName, _TRUNCATE);
                     d->hTextFont = CreateFontIndirectW(&lf);
                     if (!d->hTextFont) d->hTextFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
                 }
                 SendMessageW(hEdit, WM_SETFONT, (WPARAM)d->hTextFont, TRUE);
-                SendMessageW(hEdit, EM_SETMARGINS, EC_LEFTMARGIN|EC_RIGHTMARGIN, MAKELPARAM(10,10));
+
+                /* Add some padding */
+                SendMessageW(hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(10, 10));
+
                 if (d->mdUtf8) {
                     wchar_t* w = utf8_to_wide_dup(d->mdUtf8);
                     if (w) { SetWindowTextW(hEdit, w); free(w); }
@@ -321,9 +548,102 @@ static void toggle_split_view(MDViewData* d) {
             }
         }
         d->splitView = 1;
-    } else d->splitView = 0;
+    } else {
+        d->splitView = 0;
+    }
+
     layout_views(d);
+
     if (d->splitView && d->hwndText) sync_html_to_edit(d);
+}
+
+
+static void show_context_menu(MDViewData* d, HWND hwnd, int x, int y) {
+    if (!d) return;
+
+    HMENU hMenu = CreatePopupMenu();
+    if (!hMenu) return;
+
+    AppendMenuW(hMenu, MF_STRING, IDM_COPY,  L"Copy\tCtrl+C");
+    AppendMenuW(hMenu, MF_STRING, IDM_PASTE, L"Paste\tCtrl+V");
+    AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE_SPLIT, L"Toggle split text view\tCtrl+M");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_IN,    L"Zoom in\tCtrl++");
+    AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_OUT,   L"Zoom out\tCtrl+-");
+    AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_RESET, L"Reset zoom\tCtrl+0");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE_DARK,     L"Toggle dark mode\tCtrl+D");
+    AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE_TOC,      L"Toggle table of contents\tCtrl+T");
+    AppendMenuW(hMenu, MF_STRING, IDM_SEARCH,          L"Search\tCtrl+F");
+    AppendMenuW(hMenu, MF_STRING, IDM_PRINT,           L"Print\tCtrl+P");
+    AppendMenuW(hMenu, MF_STRING, IDM_TOP,             L"Scroll to top\tCtrl+G");
+    AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE_LINEWRAP, L"Toggle line wrap\tCtrl+L");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hMenu, MF_STRING, IDM_WIDTH_TOGGLE, L"Toggle content width\tCtrl+W");
+    AppendMenuW(hMenu, MF_STRING, IDM_WIDTH_NORMAL, L"Content width (normal)\tCtrl+Shift+W");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+    AppendMenuW(hMenu, MF_STRING, IDM_HELP, L"Help\tF1");
+
+    UINT flags = TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY;
+    int cmd = (int)TrackPopupMenu(hMenu, flags, x, y, 0, hwnd, NULL);
+    DestroyMenu(hMenu);
+
+    switch (cmd) {
+    case IDM_COPY:
+        browser_exec_olecmd(d->pBrowser, OLECMDID_COPY);
+        break;
+    case IDM_PASTE:
+        browser_exec_olecmd(d->pBrowser, OLECMDID_PASTE);
+        break;
+    case IDM_TOGGLE_SPLIT:
+        toggle_split_view(d);
+        break;
+
+    case IDM_ZOOM_IN:
+        exec_js(d->pBrowser, L"zi()");
+        break;
+    case IDM_ZOOM_OUT:
+        exec_js(d->pBrowser, L"zo()");
+        break;
+    case IDM_ZOOM_RESET:
+        exec_js(d->pBrowser, L"zr()");
+        break;
+
+    case IDM_TOGGLE_DARK:
+        exec_js(d->pBrowser, L"td()");
+        break;
+    case IDM_TOGGLE_TOC:
+        exec_js(d->pBrowser, L"ttoc()");
+        break;
+    case IDM_SEARCH:
+        exec_js(d->pBrowser, L"sf()");
+        break;
+    case IDM_PRINT:
+        exec_js(d->pBrowser, L"window.print()");
+        break;
+    case IDM_TOP:
+        exec_js(d->pBrowser, L"window.scrollTo(0,0)");
+        break;
+    case IDM_TOGGLE_LINEWRAP:
+        exec_js(d->pBrowser, L"tl()");
+        break;
+    case IDM_WIDTH_TOGGLE:
+        exec_js(d->pBrowser, L"cw()");
+        break;
+    case IDM_WIDTH_NORMAL:
+        exec_js(d->pBrowser, L"cn()");
+        break;
+
+    case IDM_HELP:
+        exec_js(d->pBrowser, L"th()");
+        break;
+    default:
+        break;
+    }
 }
 
 /* Subclass proc for the IE Server window - only intercepts our Ctrl+ hotkeys,
@@ -343,15 +663,6 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
                 exec_js(d->pBrowser, L"zo()"); return 0;
             case '0': case VK_NUMPAD0:
                 exec_js(d->pBrowser, L"zr()"); return 0;
-            case 'C':
-                /* Context-aware copy (contributed by Nigurrath) */
-                do_copy(d); return 0;
-            case 'A':
-                /* Select All */
-                exec_js(d->pBrowser, L"document.execCommand('selectAll')"); return 0;
-            case 'M':
-                /* Toggle split view (contributed by Nigurrath) */
-                toggle_split_view(d); return 0;
             case 'D':
                 exec_js(d->pBrowser, L"td()"); return 0;
             case 'T':
@@ -372,92 +683,62 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
                 return 0;
             case VK_OEM_2:
                 exec_js(d->pBrowser, L"th()"); return 0;
+            case 'A':
+                do_select_all(d); return 0;
+            case 'C':
+                do_copy(d); return 0;
+            case 'V':
+                browser_execwb(d->pBrowser, OLECMDID_PASTE); return 0;
+            case 'M':
+                toggle_split_view(d); return 0;
             }
         }
         if (wP == VK_F1) {
             exec_js(d->pBrowser, L"th()"); return 0;
         }
         if (wP == VK_F3) {
-            if (GetKeyState(VK_SHIFT) & 0x8000)
+            if (GetKeyState(VK_SHIFT) & 0x8000) 
                 exec_js(d->pBrowser, L"fp()");
-            else
+            else 
                 exec_js(d->pBrowser, L"fn()");
             return 0;
         }
+        
         /* Escape: the IE control eats it, so forward to TC's lister parent */
         if (wP == VK_ESCAPE) {
+            HWND parent = GetParent(GetParent(GetParent(hwnd))); /* IE_Server -> Shell DocObj -> Shell Embed -> our container -> TC lister */
+            if (!parent) parent = GetParent(GetParent(hwnd));
+            /* Walk up to find TC's lister window and send Escape */
             HWND w = hwnd;
-            while (w) { HWND p = GetParent(w); if (!p) break; w = p; }
+            while (w) {
+                HWND p = GetParent(w);
+                if (!p) break;
+                /* Send to the topmost parent we can find */
+                w = p;
+            }
             if (w) PostMessageW(w, WM_KEYDOWN, VK_ESCAPE, lP);
             return 0;
         }
-        /* Enter: navigate find matches (next/prev with Shift) */
-        if (wP == VK_RETURN) {
-            if (GetKeyState(VK_SHIFT) & 0x8000)
-                exec_js(d->pBrowser, L"fp()");
-            else
-                exec_js(d->pBrowser, L"fn()");
-            return 0;
-        }
     }
 
-    /* Prevent menu items from being greyed out */
-    if (msg == WM_INITMENUPOPUP) {
-        HMENU hm = (HMENU)wP;
-        int count = GetMenuItemCount(hm);
-        for (int j = 0; j < count; j++)
-            EnableMenuItem(hm, j, MF_BYPOSITION | MF_ENABLED);
-        return 0;
-    }
-
-    /* Right-click context menu */
+    
     if (msg == WM_CONTEXTMENU) {
-        enum { IDM_COPY=1, IDM_SELALL, IDM_SPLIT, IDM_FIND, IDM_TOC,
-               IDM_ZOOMIN, IDM_ZOOMOUT, IDM_ZOOMRST, IDM_DARK, IDM_LINES, IDM_PRINT, IDM_HELP };
-        HMENU hm = CreatePopupMenu();
-        AppendMenuW(hm, MF_STRING, IDM_COPY,    L"Copy\tCtrl+C");
-        AppendMenuW(hm, MF_STRING, IDM_SELALL,  L"Select All\tCtrl+A");
-        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hm, MF_STRING, IDM_SPLIT,   d->splitView ? L"Close Source View\tCtrl+M" : L"Split Source View\tCtrl+M");
-        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hm, MF_STRING, IDM_FIND,    L"Find...\tCtrl+F");
-        AppendMenuW(hm, MF_STRING, IDM_TOC,     L"Table of Contents\tCtrl+T");
-        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hm, MF_STRING, IDM_ZOOMIN,  L"Zoom In\tCtrl++");
-        AppendMenuW(hm, MF_STRING, IDM_ZOOMOUT, L"Zoom Out\tCtrl+-");
-        AppendMenuW(hm, MF_STRING, IDM_ZOOMRST, L"Reset Zoom\tCtrl+0");
-        AppendMenuW(hm, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hm, MF_STRING, IDM_DARK,    L"Toggle Dark Mode\tCtrl+D");
-        AppendMenuW(hm, MF_STRING, IDM_LINES,   L"Line Numbers\tCtrl+L");
-        AppendMenuW(hm, MF_STRING, IDM_PRINT,   L"Print\tCtrl+P");
-        AppendMenuW(hm, MF_STRING, IDM_HELP,    L"Keyboard Shortcuts\tF1");
-        POINT pt; pt.x = GET_X_LPARAM(lP); pt.y = GET_Y_LPARAM(lP);
-        if (pt.x == -1 && pt.y == -1) { GetCursorPos(&pt); }
-        int cmd = TrackPopupMenu(hm, TPM_RETURNCMD|TPM_RIGHTBUTTON|TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, NULL);
-        DestroyMenu(hm);
-        switch(cmd) {
-        case IDM_COPY:    do_copy(d); break;
-        case IDM_SELALL:  exec_js(d->pBrowser, L"document.execCommand('selectAll')"); break;
-        case IDM_SPLIT:   toggle_split_view(d); break;
-        case IDM_FIND:    exec_js(d->pBrowser, L"sf()"); break;
-        case IDM_TOC:     exec_js(d->pBrowser, L"ttoc()"); break;
-        case IDM_ZOOMIN:  exec_js(d->pBrowser, L"zi()"); break;
-        case IDM_ZOOMOUT: exec_js(d->pBrowser, L"zo()"); break;
-        case IDM_ZOOMRST: exec_js(d->pBrowser, L"zr()"); break;
-        case IDM_DARK:    exec_js(d->pBrowser, L"td()"); break;
-        case IDM_LINES:   exec_js(d->pBrowser, L"tl()"); break;
-        case IDM_PRINT:   exec_js(d->pBrowser, L"window.print()"); break;
-        case IDM_HELP:    exec_js(d->pBrowser, L"th()"); break;
+        int x = GET_X_LPARAM(lP);
+        int y = GET_Y_LPARAM(lP);
+        if (x == -1 && y == -1) {
+            POINT pt; GetCursorPos(&pt);
+            x = pt.x; y = pt.y;
         }
+        show_context_menu(d, hwnd, x, y);
         return 0;
     }
 
-    {
+{
         LRESULT r = CallWindowProcW(d->origIEProc, hwnd, msg, wP, lP);
-        /* Scroll sync: rendered → raw source (contributed by Nigurrath) */
         if (d->splitView && (msg == WM_VSCROLL || msg == WM_MOUSEWHEEL ||
-            (msg == WM_KEYDOWN && (wP == VK_UP || wP == VK_DOWN || wP == VK_PRIOR || wP == VK_NEXT || wP == VK_HOME || wP == VK_END))))
+            (msg == WM_KEYDOWN && (wP == VK_UP || wP == VK_DOWN || wP == VK_PRIOR || wP == VK_NEXT || wP == VK_HOME || wP == VK_END)))) {
             sync_html_to_edit(d);
+        }
         return r;
     }
 }
@@ -567,37 +848,6 @@ static SiteImpl* CreateSiteImpl(HWND hwnd) {
     return s;
 }
 
-/* ── Reference Link Map ──────────────────────────────────────────────── */
-
-typedef struct { char label[128]; char url[1024]; char title[256]; } RefLink;
-typedef struct { RefLink* items; int count; int cap; } RefMap;
-
-static RefMap g_refs = {0};
-
-static void ref_clear(void) { free(g_refs.items); g_refs.items=NULL; g_refs.count=0; g_refs.cap=0; }
-
-static void ref_add(const char* label, const char* url, const char* title) {
-    if (g_refs.count >= g_refs.cap) {
-        g_refs.cap = g_refs.cap ? g_refs.cap*2 : 32;
-        g_refs.items = (RefLink*)realloc(g_refs.items, g_refs.cap * sizeof(RefLink));
-    }
-    RefLink* r = &g_refs.items[g_refs.count++];
-    /* Store label as lowercase for case-insensitive lookup */
-    int i; for(i=0; label[i] && i<127; i++) r->label[i] = (label[i]>='A'&&label[i]<='Z') ? label[i]+32 : label[i];
-    r->label[i] = '\0';
-    strncpy(r->url, url, 1023); r->url[1023]='\0';
-    strncpy(r->title, title, 255); r->title[255]='\0';
-}
-
-static RefLink* ref_find(const char* label) {
-    char lower[128];
-    int i; for(i=0; label[i] && i<127; i++) lower[i] = (label[i]>='A'&&label[i]<='Z') ? label[i]+32 : label[i];
-    lower[i] = '\0';
-    for(int j=0; j<g_refs.count; j++)
-        if(strcmp(g_refs.items[j].label, lower)==0) return &g_refs.items[j];
-    return NULL;
-}
-
 /* ── String Buffer ───────────────────────────────────────────────────── */
 
 typedef struct { char* data; size_t len; size_t cap; } StrBuf;
@@ -614,6 +864,19 @@ static void sb_append_esc(StrBuf* sb, const char* s, size_t n) {
         case '"': sb_append(sb,"&quot;"); break;
         default:  sb_append_char(sb,s[i]); break;
     }
+}
+
+static int is_mermaid_lang(const char* lang) {
+    if (!lang) return 0;
+    while (*lang == ' ' || *lang == '\t') lang++;
+    return _strnicmp(lang, "mermaid", 7) == 0 &&
+           (lang[7] == '\0' || lang[7] == ' ' || lang[7] == '\t' || lang[7] == '`' || lang[7] == '~');
+}
+
+static void append_mermaid_block(StrBuf* sb, const char* src, size_t n) {
+    sb_append(sb, "<div class=\"mdv-mermaid\" data-mdv-mermaid=\"1\"><pre class=\"mdv-mermaid-src\"><code>");
+    sb_append_esc(sb, src, n);
+    sb_append(sb, "</code></pre><div class=\"mdv-mermaid-view\"></div></div>\n");
 }
 
 /* ── Markdown Inline Parser ──────────────────────────────────────────── */
@@ -644,65 +907,25 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
             if(!found) sb_append_esc(sb,t+st,tk);
             continue;
         }
-        /* Image ![alt](url) or ![alt][ref] */
+        /* Image ![alt](url) */
         if (t[i]=='!' && i+1<len && t[i+1]=='[') {
             size_t as=i+2,j=as; int d=1;
             while(j<len&&d>0){if(t[j]=='[')d++;else if(t[j]==']')d--;if(d>0)j++;}
             if(j<len&&j+1<len&&t[j+1]=='('){
-                /* Inline: ![alt](url) */
                 size_t us=j+2,ue=us; while(ue<len&&t[ue]!=')')ue++;
                 if(ue<len){ sb_append(sb,"<img alt=\""); sb_append_esc(sb,t+as,j-as);
                     sb_append(sb,"\" src=\""); sb_append_esc(sb,t+us,ue-us);
                     sb_append(sb,"\" style=\"max-width:100%\">"); i=ue+1; continue; }
             }
-            if(j<len&&j+1<len&&t[j+1]=='['){
-                /* Reference: ![alt][label] */
-                size_t ls=j+2,le=ls; while(le<len&&t[le]!=']')le++;
-                if(le<len){ char label[128]={0}; size_t ll=le-ls; if(ll>127)ll=127; memcpy(label,t+ls,ll);
-                    RefLink* r=ref_find(label);
-                    if(r){ sb_append(sb,"<img alt=\""); sb_append_esc(sb,t+as,j-as);
-                        sb_append(sb,"\" src=\""); sb_append(sb,r->url);
-                        if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
-                        sb_append(sb,"\" style=\"max-width:100%\">"); i=le+1; continue; }
-                }
-            }
-            /* Also try ![alt] with alt as the label */
-            if(j<len) {
-                char label[128]={0}; size_t ll=j-as; if(ll>127)ll=127; memcpy(label,t+as,ll);
-                RefLink* r=ref_find(label);
-                if(r){ sb_append(sb,"<img alt=\""); sb_append_esc(sb,t+as,j-as);
-                    sb_append(sb,"\" src=\""); sb_append(sb,r->url);
-                    if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
-                    sb_append(sb,"\" style=\"max-width:100%\">"); i=j+1; continue; }
-            }
         }
-        /* Link [text](url) or [text][ref] */
+        /* Link [text](url) */
         if (t[i]=='[') {
             size_t ts=i+1,j=ts; int d=1;
             while(j<len&&d>0){if(t[j]=='[')d++;else if(t[j]==']')d--;if(d>0)j++;}
             if(j<len&&j+1<len&&t[j+1]=='('){
-                /* Inline: [text](url) */
                 size_t us=j+2,ue=us; while(ue<len&&t[ue]!=')')ue++;
                 if(ue<len){ sb_append(sb,"<a href=\""); sb_append_esc(sb,t+us,ue-us);
                     sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts); sb_append(sb,"</a>"); i=ue+1; continue; }
-            }
-            if(j<len&&j+1<len&&t[j+1]=='['){
-                /* Reference: [text][label] */
-                size_t ls=j+2,le=ls; while(le<len&&t[le]!=']')le++;
-                if(le<len){ char label[128]={0}; size_t ll=le-ls; if(ll>127)ll=127; memcpy(label,t+ls,ll);
-                    RefLink* r=ref_find(label);
-                    if(r){ sb_append(sb,"<a href=\""); sb_append(sb,r->url);
-                        if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
-                        sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts); sb_append(sb,"</a>"); i=le+1; continue; }
-                }
-            }
-            /* Also try [text] with text as the label */
-            if(j<len&&(j+1>=len||t[j+1]!='(')) {
-                char label[128]={0}; size_t ll=j-ts; if(ll>127)ll=127; memcpy(label,t+ts,ll);
-                RefLink* r=ref_find(label);
-                if(r){ sb_append(sb,"<a href=\""); sb_append(sb,r->url);
-                    if(r->title[0]){sb_append(sb,"\" title=\""); sb_append(sb,r->title);}
-                    sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts); sb_append(sb,"</a>"); i=j+1; continue; }
             }
         }
         /* Strikethrough ~~text~~ */
@@ -732,18 +955,6 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
             size_t us=i; while(i<len&&t[i]!=' '&&t[i]!='\n'&&t[i]!='\r'&&t[i]!=')'&&t[i]!='>'&&t[i]!='"')i++;
             while(i>us&&(t[i-1]=='.'||t[i-1]==','||t[i-1]==';'))i--;
             sb_append(sb,"<a href=\""); sb_append_esc(sb,t+us,i-us); sb_append(sb,"\">"); sb_append_esc(sb,t+us,i-us); sb_append(sb,"</a>"); continue;
-        }
-        /* Inline HTML — pass through <tag>, </tag>, <tag attr="val">, <br/>, etc. */
-        if (t[i]=='<' && i+1<len && (isalpha(t[i+1]) || t[i+1]=='/' || t[i+1]=='!')) {
-            size_t j=i+1;
-            /* Find the closing > */
-            while(j<len && t[j]!='>') j++;
-            if (j<len) {
-                /* Pass through raw */
-                sb_ensure(sb, j-i+1);
-                for(size_t k=i; k<=j; k++) sb_append_char(sb, t[k]);
-                i=j+1; continue;
-            }
         }
         /* Plain char */
         sb_append_esc(sb,&t[i],1); i++;
@@ -801,65 +1012,10 @@ static int is_ol(const char* t) { int i=0; while(t[i]>='0'&&t[i]<='9')i++; if(i=
 
 /* ── Markdown Block Parser ───────────────────────────────────────────── */
 
-static int g_md_depth = 0;
-
 static char* md_to_html(const char* markdown) {
     StrBuf sb; sb_init(&sb);
     Lines lines = split_lines(markdown);
     int i = 0;
-    int is_toplevel = (g_md_depth == 0);
-    g_md_depth++;
-
-    /* First pass: collect reference link definitions [label]: URL "title" */
-    /* Only clear at top level; nested calls (blockquotes, lists) keep parent refs */
-    if (is_toplevel) ref_clear();
-    for (int r = 0; r < lines.count; r++) {
-        const char* rl = lines.lines[r];
-        while (*rl == ' ') rl++;
-        if (rl[0] != '[') continue;
-        /* Parse [label]: */
-        const char* ls = rl + 1;
-        const char* le = ls;
-        while (*le && *le != ']') le++;
-        if (*le != ']' || *(le+1) != ':') continue;
-        size_t labLen = le - ls;
-        if (labLen == 0 || labLen > 127) continue;
-        char label[128]; memcpy(label, ls, labLen); label[labLen] = '\0';
-        /* Check it's not a task list item like [x] or [ ] */
-        if (labLen == 1 && (label[0]=='x' || label[0]=='X' || label[0]==' ')) continue;
-        const char* up = le + 2;
-        while (*up == ' ') up++;
-        /* Parse URL (optionally in angle brackets) */
-        char url[1024] = "";
-        if (*up == '<') {
-            up++;
-            const char* ue = up;
-            while (*ue && *ue != '>') ue++;
-            size_t ul = ue - up; if (ul > 1023) ul = 1023;
-            memcpy(url, up, ul); url[ul] = '\0';
-            up = (*ue == '>') ? ue + 1 : ue;
-        } else {
-            const char* ue = up;
-            while (*ue && *ue != ' ' && *ue != '\t' && *ue != '"') ue++;
-            size_t ul = ue - up; if (ul > 1023) ul = 1023;
-            memcpy(url, up, ul); url[ul] = '\0';
-            up = ue;
-        }
-        if (url[0] == '\0') continue;
-        /* Parse optional title in quotes */
-        char title[256] = "";
-        while (*up == ' ' || *up == '\t') up++;
-        if (*up == '"') {
-            up++;
-            const char* te = up;
-            while (*te && *te != '"') te++;
-            size_t tl = te - up; if (tl > 255) tl = 255;
-            memcpy(title, up, tl); title[tl] = '\0';
-        }
-        ref_add(label, url, title);
-        /* Mark this line as consumed by blanking it */
-        lines.lines[r][0] = '\0';
-    }
 
     while (i < lines.count) {
         const char* line = lines.lines[i];
@@ -871,15 +1027,34 @@ static char* md_to_html(const char* markdown) {
         /* Fenced code block */
         if (strncmp(tr,"```",3)==0 || strncmp(tr,"~~~",3)==0) {
             char fc=tr[0]; const char* lang=tr+3; while(*lang==' ')lang++;
-            sb_append(&sb,"<pre><code");
-            if(*lang){ sb_append(&sb," class=\"language-"); const char* le=lang; while(*le&&*le!=' '&&*le!='`'&&*le!='~')le++; sb_append_esc(&sb,lang,le-lang); sb_append(&sb,"\""); }
-            sb_append(&sb,">"); i++;
+            int isMermaid = is_mermaid_lang(lang);
+            StrBuf mermaid;
+            if (isMermaid) {
+                sb_init(&mermaid);
+            } else {
+                sb_append(&sb,"<pre><code");
+                if(*lang){ sb_append(&sb," class=\"language-"); const char* le=lang; while(*le&&*le!=' '&&*le!='`'&&*le!='~')le++; sb_append_esc(&sb,lang,le-lang); sb_append(&sb,"\""); }
+                sb_append(&sb,">");
+            }
+            i++;
             while(i<lines.count){ const char* cl=lines.lines[i]; const char* ct=cl; while(*ct==' ')ct++;
                 if((fc=='`'&&strncmp(ct,"```",3)==0)||(fc=='~'&&strncmp(ct,"~~~",3)==0)){i++;break;}
-                if(sb.data[sb.len-1]!='>') sb_append(&sb,"\n");
-                sb_append_esc(&sb,cl,strlen(cl)); i++;
+                if (isMermaid) {
+                    if (mermaid.len > 0) sb_append(&mermaid,"\n");
+                    sb_append(&mermaid,cl);
+                } else {
+                    if(sb.data[sb.len-1]!='>') sb_append(&sb,"\n");
+                    sb_append_esc(&sb,cl,strlen(cl));
+                }
+                i++;
             }
-            sb_append(&sb,"</code></pre>\n"); continue;
+            if (isMermaid) {
+                append_mermaid_block(&sb, mermaid.data, mermaid.len);
+                free(mermaid.data);
+            } else {
+                sb_append(&sb,"</code></pre>\n");
+            }
+            continue;
         }
 
         /* Indented code block */
@@ -899,9 +1074,9 @@ static char* md_to_html(const char* markdown) {
             int lv=count_leading(tr,'#');
             if(lv>=1&&lv<=6&&tr[lv]==' '){
                 const char* c=tr+lv+1; size_t cl=strlen(c);
-                while(cl>0&&c[cl-1]=='#')cl--; while(cl>0&&c[cl-1]==' ')cl--;
-                char tag[4]; sprintf(tag,"h%d",lv);
-                char idnum[16]; sprintf(idnum,"%d",i);
+                while (cl > 0 && c[cl - 1] == '#')cl--; while (cl > 0 && c[cl - 1] == ' ')cl--;
+                char tag[4]; _snprintf(tag, sizeof(tag), "h%d", lv);
+                char idnum[16]; _snprintf(idnum, sizeof(idnum), "%d", i);
                 sb_append(&sb,"<"); sb_append(&sb,tag); sb_append(&sb," id=\"mdv-h");
                 sb_append(&sb,idnum); sb_append(&sb,"\">");
                 parse_inline(&sb,c,cl);
@@ -984,48 +1159,6 @@ static char* md_to_html(const char* markdown) {
             sb_append(&sb,ordered?"</ol>\n":"</ul>\n"); continue;
         }
 
-        /* Raw HTML blocks — pass through unescaped */
-        if (tr[0]=='<') {
-            /* Check for block-level HTML tags */
-            static const char* block_tags[] = {
-                "div","p","table","thead","tbody","tr","th","td","ul","ol","li",
-                "h1","h2","h3","h4","h5","h6","pre","blockquote","hr","br",
-                "section","article","aside","nav","header","footer","main",
-                "figure","figcaption","details","summary","dl","dt","dd",
-                "form","fieldset","input","textarea","select","button","label",
-                "video","audio","source","iframe","canvas","svg","img",
-                "style","script","!--", NULL
-            };
-            int is_html_block = 0;
-            for (int t=0; block_tags[t]; t++) {
-                size_t tl = strlen(block_tags[t]);
-                if (_strnicmp(tr+1, block_tags[t], tl)==0) {
-                    char after = tr[1+tl];
-                    if (after==' '||after=='>'||after=='\0'||after=='\n'||after=='/'||after=='\r') {
-                        is_html_block = 1; break;
-                    }
-                }
-                /* Also match closing tags like </div> at start of line */
-                if (tr[1]=='/' && _strnicmp(tr+2, block_tags[t], tl)==0) {
-                    char after = tr[2+tl];
-                    if (after=='>'||after=='\0'||after=='\n'||after==' ') {
-                        is_html_block = 1; break;
-                    }
-                }
-            }
-            if (is_html_block) {
-                /* Collect contiguous non-blank lines as raw HTML */
-                while (i < lines.count) {
-                    const char* hl = lines.lines[i];
-                    if (hl[0]=='\0') break;
-                    sb_append(&sb, hl);
-                    sb_append(&sb, "\n");
-                    i++;
-                }
-                continue;
-            }
-        }
-
         /* Paragraph */
         { StrBuf para; sb_init(&para);
             while(i<lines.count){
@@ -1047,7 +1180,6 @@ static char* md_to_html(const char* markdown) {
         }
     }
     free_lines(&lines);
-    g_md_depth--;
     return sb.data;
 }
 
@@ -1060,38 +1192,6 @@ static int is_dark_theme(void) {
     } return 0;
 }
 
-/* ── INI Settings Persistence ────────────────────────────────────────── */
-
-static char g_iniPath[MAX_PATH] = {0};
-
-typedef struct {
-    int fontSize;    /* 9-30, default 19 */
-    int isDark;      /* 0 or 1, -1 = auto */
-    int maxWidth;    /* column width in px, 0 = no limit, default 0 */
-    int lineNums;    /* 0 or 1 */
-} MDVSettings;
-
-static MDVSettings g_settings = { 19, -1, 960, 0 };
-
-static void load_settings(void) {
-    if (!g_iniPath[0]) return;
-    g_settings.fontSize = GetPrivateProfileIntA("MDView", "FontSize", 19, g_iniPath);
-    g_settings.isDark   = GetPrivateProfileIntA("MDView", "DarkMode", -1, g_iniPath);
-    g_settings.maxWidth = GetPrivateProfileIntA("MDView", "MaxWidth", 0, g_iniPath);
-    g_settings.lineNums = GetPrivateProfileIntA("MDView", "LineNumbers", 0, g_iniPath);
-    /* Clamp */
-    if (g_settings.fontSize < 9) g_settings.fontSize = 9;
-    if (g_settings.fontSize > 30) g_settings.fontSize = 30;
-    if (g_settings.maxWidth != 0 && g_settings.maxWidth < 400) g_settings.maxWidth = 400;
-    if (g_settings.maxWidth > 9999) g_settings.maxWidth = 9999;
-}
-
-static void save_setting_int(const char* key, int val) {
-    if (!g_iniPath[0]) return;
-    char buf[16]; sprintf(buf, "%d", val);
-    WritePrivateProfileStringA("MDView", key, buf, g_iniPath);
-}
-
 /* ── CSS ─────────────────────────────────────────────────────────────── */
 
 static void build_css(StrBuf* sb) {
@@ -1101,7 +1201,7 @@ static void build_css(StrBuf* sb) {
 
     /* Body — full viewport background */
     sb_append(sb, "body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;");
-    { char tmp[64]; sprintf(tmp, "font-size:%dpx;", g_settings.fontSize); sb_append(sb, tmp); }
+    { char tmp[64]; _snprintf(tmp, sizeof(tmp), "font-size:%dpx;", g_settings.fontSize); sb_append(sb, tmp); }
     sb_append(sb, "line-height:1.7;color:#24292e;background:#fff;margin:0;padding:0;"
     "transition:background .2s,color .2s}");
     sb_append(sb, "body.dark{color:#d4d4d4;background:#1e1e1e}");
@@ -1109,7 +1209,7 @@ static void build_css(StrBuf* sb) {
     /* Content container — centered, optional max-width */
     sb_append(sb, "#mdv-ct{margin:0 auto;padding:12px 32px 24px;");
     if (g_settings.maxWidth > 0) {
-        char tmp[64]; sprintf(tmp, "max-width:%dpx;", g_settings.maxWidth); sb_append(sb, tmp);
+        char tmp[64]; sprintf_s(tmp, sizeof(tmp), "max-width:%dpx;", g_settings.maxWidth); sb_append(sb, tmp);
     }
     sb_append(sb, "}");
 
@@ -1131,6 +1231,27 @@ static void build_css(StrBuf* sb) {
     "body.dark pre{background:#2d2d2d;border-color:#404040}"
     "pre code{background:none;padding:0;color:#24292e;white-space:pre-wrap;word-wrap:break-word}"
     "body.dark pre code{color:#d4d4d4}"
+    ".mdv-mermaid{margin:1em 0}"
+    ".mdv-mermaid-view{display:none;margin-top:10px;padding:16px;background:#f6f8fa;border:1px solid #e1e4e8;border-radius:6px;overflow:hidden;font-size:1em;text-align:center}"
+    "body.dark .mdv-mermaid-view{background:#2d2d2d;border-color:#404040}"
+    ".mdv-mermaid.ok .mdv-mermaid-view{display:block}"
+    ".mdv-mermaid.ok .mdv-mermaid-src{display:none}"
+    ".mdv-mermaid svg{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;font-family:inherit;font-size:inherit}"
+    ".mdv-mm-node{fill:#ffffff;stroke:#57606a;stroke-width:1.5}"
+    ".mdv-mm-edge{stroke:#57606a;stroke-width:2;fill:none}"
+    ".mdv-mm-edge.dash{stroke-dasharray:6 4}"
+    ".mdv-mm-edge.bold{stroke-width:3}"
+    ".mdv-mm-life{stroke:#8b949e;stroke-width:1.5;stroke-dasharray:6 4;fill:none}"
+    ".mdv-mm-note{fill:#fff8c5;stroke:#8b949e;stroke-width:1.2}"
+    ".mdv-mermaid svg text{font-family:inherit;font-size:1em}"
+    ".mdv-mm-text{fill:#24292e;font-family:inherit;font-size:1em}"
+    ".mdv-mm-note-text{fill:#24292e;font-family:inherit;font-size:1em}"
+    "body.dark .mdv-mm-node{fill:#1e1e1e;stroke:#9da7b3}"
+    "body.dark .mdv-mm-edge{stroke:#9da7b3}"
+    "body.dark .mdv-mm-life{stroke:#9da7b3}"
+    "body.dark .mdv-mm-note{fill:#4a4a48;stroke:#80868f}"
+    "body.dark .mdv-mm-text{fill:#d4d4d4}"
+    "body.dark .mdv-mm-note-text{fill:#f0f0f0}"
     "blockquote{margin:.8em 0;padding:.5em 1em;border-left:4px solid #0366d6;"
     "background:#f6f8fa;color:#6a737d}"
     "body.dark blockquote{border-left-color:#569cd6;background:#252526;color:#aaa}"
@@ -1267,7 +1388,7 @@ static void build_css(StrBuf* sb) {
 static void build_js(StrBuf* sb) {
     /* Initial values from settings */
     char init[128];
-    sprintf(init, "<script>var fs=%d,mw=%d,ln=%d,tt=null;",
+    _snprintf(init, sizeof(init), "<script>var fs=%d,mw=%d,ln=%d,tt=null;",
             g_settings.fontSize, g_settings.maxWidth, g_settings.lineNums);
     sb_append(sb, init);
 
@@ -1280,7 +1401,22 @@ static void build_js(StrBuf* sb) {
     "function zi(){fs=Math.min(fs+1,30);af()}"
     "function zo(){fs=Math.max(fs-1,9);af()}"
     "function zr(){fs=19;af()}"
-    "function af(){document.body.style.fontSize=fs+'px';toast('Font: '+fs+'px')}"
+    "function fitMermaidSvg(svg){var vb,parts,baseW,baseH,view,availW,targetW,targetH;"
+    "if(!svg)return;vb=svg.getAttribute('viewBox');if(!vb)return;parts=vb.split(/\\s+/);if(parts.length!==4)return;"
+    "baseW=parseFloat(parts[2]);baseH=parseFloat(parts[3]);if(!(baseW>0)||!(baseH>0))return;"
+    "view=svg.parentNode;availW=view?(view.clientWidth||view.offsetWidth):0;"
+    "if(!(availW>0)){if(window.setTimeout&&!svg.getAttribute('data-mdv-fit-pending')){svg.setAttribute('data-mdv-fit-pending','1');window.setTimeout(function(){try{svg.removeAttribute('data-mdv-fit-pending');fitMermaidSvg(svg);}catch(ex){}},0);}return;}"
+    "availW=Math.max(220,availW-4);targetW=Math.min(availW,baseW);targetH=Math.max(80,Math.round(baseH*(targetW/baseW)));"
+    "svg.style.width=targetW+'px';svg.style.height=targetH+'px';}"
+    "function syncMermaidTypography(){var svgs=document.querySelectorAll('.mdv-mermaid svg');"
+    "var cs=window.getComputedStyle?window.getComputedStyle(document.body,null):null;"
+    "var ff=cs&&cs.fontFamily?cs.fontFamily:document.body.style.fontFamily;"
+    "var fz=cs&&cs.fontSize?cs.fontSize:document.body.style.fontSize;"
+    "for(var i=0;i<svgs.length;i++){if(ff)svgs[i].style.fontFamily=ff;if(fz)svgs[i].style.fontSize=fz;fitMermaidSvg(svgs[i]);}}"
+    "function mmBodyFontPx(){var cs=window.getComputedStyle?window.getComputedStyle(document.body,null):null;"
+    "var fz=cs&&cs.fontSize?parseFloat(cs.fontSize):parseFloat(document.body.style.fontSize);"
+    "if(!(fz>0))fz=16;return fz;}"
+    "function af(){document.body.style.fontSize=fs+'px';syncMermaidTypography();toast('Font: '+fs+'px')}"
 
     /* Theme toggle */
     "function td(){var b=document.body,h=document.documentElement;"
@@ -1291,8 +1427,8 @@ static void build_js(StrBuf* sb) {
 
     /* Column width */
     "function cw(){if(mw===0)mw=800;mw=Math.min(mw+80,9999);aw()}"
-    "function cn(){if(mw===0)return;mw=mw-80;if(mw<400){mw=0;document.getElementById('mdv-ct').style.maxWidth='none';toast('Width: full');return;}aw()}"
-    "function aw(){document.getElementById('mdv-ct').style.maxWidth=mw+'px';toast('Width: '+mw+'px')}"
+    "function cn(){if(mw===0)return;mw=mw-80;if(mw<400){mw=0;document.getElementById('mdv-ct').style.maxWidth='none';syncMermaidTypography();toast('Width: full');return;}aw()}"
+    "function aw(){document.getElementById('mdv-ct').style.maxWidth=mw+'px';syncMermaidTypography();toast('Width: '+mw+'px')}"
 
     /* Line numbers toggle */
     "function tl(){"
@@ -1340,35 +1476,56 @@ static void build_js(StrBuf* sb) {
     "var m=ms[i],p=m.parentNode;p.replaceChild(document.createTextNode(m.innerText),m);p.normalize()}"
     "fm=[];fi=-1;document.getElementById('mdv-fc').innerText=''}"
 
-    "function df(txt){cf();if(!txt)return;"
-    "var lo=txt.toLowerCase();"
+    "function df(txt,mc,ww){cf();if(!txt)return;mc=mc?1:0;ww=ww?1:0;"
     "var ct=document.getElementById('mdv-ct');if(!ct)return;"
-    "var ns=[];try{"
-    "var w=document.createTreeWalker(ct,4,{acceptNode:function(n){return 1}},false);"
+    "var w=document.createTreeWalker(ct,4,null,false),ns=[];"
+    "var re=null;"
+    "if(ww){"
+    "  var esc=txt.replace(/[\\^$.*+?()[\\]{}|]/g,'\\\\$&');"
+    "  re=new RegExp('\\\\b'+esc+'\\\\b',mc?'g':'gi');"
+    "}"
     "while(w.nextNode()){var n=w.currentNode;"
     "if(n.parentNode&&n.parentNode.tagName==='SCRIPT')continue;"
-    "if(n.nodeValue&&n.nodeValue.toLowerCase().indexOf(lo)>=0)ns.push(n)}"
-    "}catch(ex){"
-    "var els=ct.getElementsByTagName('*');"
-    "for(var ei=0;ei<els.length;ei++){for(var ci=0;ci<els[ei].childNodes.length;ci++){"
-    "var cn=els[ei].childNodes[ci];"
-    "if(cn.nodeType===3&&cn.nodeValue&&cn.nodeValue.toLowerCase().indexOf(lo)>=0)ns.push(cn)}}}"
-    "for(var ni=0;ni<ns.length;ni++){var nd=ns[ni],v=nd.nodeValue,f=document.createDocumentFragment(),"
-    "idx=0,vl=v.toLowerCase(),pos;"
-    "while((pos=vl.indexOf(lo,idx))>=0){"
-    "if(pos>idx)f.appendChild(document.createTextNode(v.substring(idx,pos)));"
-    "var sp=document.createElement('span');sp.className='hl';"
-    "sp.appendChild(document.createTextNode(v.substring(pos,pos+txt.length)));f.appendChild(sp);idx=pos+txt.length}"
-    "if(idx<v.length)f.appendChild(document.createTextNode(v.substring(idx)));nd.parentNode.replaceChild(f,nd)}"
+    "if(!n.nodeValue)continue;"
+    "if(re){if(re.test(n.nodeValue))ns.push(n);re.lastIndex=0;}"
+    "else{var hay=mc?n.nodeValue:n.nodeValue.toLowerCase();"
+    "var nee=mc?txt:txt.toLowerCase();if(hay.indexOf(nee)>=0)ns.push(n);}"
+    "}"
+    "for(var ni=0;ni<ns.length;ni++){var nd=ns[ni],v=nd.nodeValue,f=document.createDocumentFragment();"
+    "if(re){"
+    "  var m,li=0;re.lastIndex=0;"
+    "  while((m=re.exec(v))!==null){"
+    "    var s=m.index,e=s+m[0].length;"
+    "    if(s>li)f.appendChild(document.createTextNode(v.substring(li,s)));"
+    "    var sp=document.createElement('span');sp.className='hl';"
+    "    sp.appendChild(document.createTextNode(v.substring(s,e)));f.appendChild(sp);li=e;"
+    "    if(m[0].length===0)re.lastIndex++;"
+    "  }"
+    "  if(li<v.length)f.appendChild(document.createTextNode(v.substring(li)));"
+    "}else{"
+    "  var nee=mc?txt:txt.toLowerCase();"
+    "  var idx=0,pos,vl=mc?v:v.toLowerCase();"
+    "  while((pos=vl.indexOf(nee,idx))>=0){"
+    "    if(pos>idx)f.appendChild(document.createTextNode(v.substring(idx,pos)));"
+    "    var sp=document.createElement('span');sp.className='hl';"
+    "    sp.appendChild(document.createTextNode(v.substring(pos,pos+txt.length)));f.appendChild(sp);idx=pos+txt.length;"
+    "  }"
+    "  if(idx<v.length)f.appendChild(document.createTextNode(v.substring(idx)));"
+    "}"
+    "nd.parentNode.replaceChild(f,nd);}"
     "fm=document.querySelectorAll('.hl');fi=fm.length>0?0:-1;ufh()}"
 
     "function ufh(){for(var i=0;i<fm.length;i++)fm[i].className='hl';"
-    "if(fi>=0&&fi<fm.length){fm[fi].className='hl hl-a';"
-    "var r=fm[fi].getBoundingClientRect();"
-    "var wh=window.innerHeight||document.documentElement.clientHeight;"
-    "var st=document.documentElement.scrollTop||document.body.scrollTop;"
-    "var target=st+r.top-Math.max(wh/3,60);"
-    "if(target<0)target=0;window.scrollTo(0,target)}"
+    "if(fi>=0&&fi<fm.length){"
+    "  fm[fi].className='hl hl-a';"
+    "  var el=fm[fi], rect=el.getBoundingClientRect();"
+    "  var fb=document.getElementById('mdv-fb');"
+    "  var off=(fb&&fb.className.indexOf('on')>=0)?fb.offsetHeight+10:20;"
+    "  if(rect.top<off||rect.bottom>window.innerHeight){"
+    "    var st=window.pageYOffset||document.documentElement.scrollTop;"
+    "    window.scrollTo(0,rect.top+st-off);"
+    "  }"
+    "}"
     "var c=document.getElementById('mdv-fc');"
     "if(fm.length>0)c.innerText=(fi+1)+' of '+fm.length;"
     "else c.innerText=document.getElementById('mdv-fi').value?'No matches':''}"
@@ -1376,17 +1533,8 @@ static void build_js(StrBuf* sb) {
     "function fn(){if(fm.length===0)return;fi=(fi+1)%fm.length;ufh()}"
     "function fp(){if(fm.length===0)return;fi=(fi-1+fm.length)%fm.length;ufh()}"
     "function sf(){var b=document.getElementById('mdv-fb');b.className='on';"
-    "var inp=document.getElementById('mdv-fi');inp.focus();inp.select();"
-    "mdvStartFind()}"
-    "function hf(){document.getElementById('mdv-fb').className='';cf();mdvStopFind()}"
-
-    /* Poll-based find: watches input value since MSHTML inline events are unreliable */
-    "var _fwt=null,_flv='';"
-    "function mdvStartFind(){mdvStopFind();_flv=document.getElementById('mdv-fi').value||'';"
-    "_fwt=setInterval(function(){"
-    "var inp=document.getElementById('mdv-fi');if(!inp)return;"
-    "var v=inp.value;if(v!==_flv){_flv=v;df(v)}},150)}"
-    "function mdvStopFind(){if(_fwt){clearInterval(_fwt);_fwt=null}}"
+    "var inp=document.getElementById('mdv-fi');inp.focus();inp.select()}"
+    "function hf(){document.getElementById('mdv-fb').className='';cf()}"
 
     /* Help */
     "function th(){var h=document.getElementById('mdv-help');h.className=h.className==='on'?'':'on'}"
@@ -1470,6 +1618,209 @@ static void build_js(StrBuf* sb) {
     "}}}"
 
     /* Keyboard handler (backup — primary interception is via IE subclass) */
+    "function mmTrim(s){return s?s.replace(/^\\s+|\\s+$/g,''):''}"
+    "function mmNodeToken(s){var m=/^([A-Za-z0-9_:-]+)(.*)$/.exec(mmTrim(s)),mm;if(!m)return null;"
+    "var id=m[1],rest=mmTrim(m[2]),text=id,shape='rect';"
+    "if(rest){"
+    "if((mm=/^\\[([^\\]]*)\\]$/.exec(rest)))text=mm[1];"
+    "else if((mm=/^\\(\\[([^\\]]*)\\]\\)$/.exec(rest))){text=mm[1];shape='round'}"
+    "else if((mm=/^\\(\\((.*)\\)\\)$/.exec(rest))){text=mm[1];shape='circle'}"
+    "else if((mm=/^\\((.*)\\)$/.exec(rest))){text=mm[1];shape='round'}"
+    "else if((mm=/^\\{([^}]*)\\}$/.exec(rest))){text=mm[1];shape='diamond'}"
+    "else return null;}"
+    "return{id:id,text:mmTrim(text)||id,shape:shape}}"
+    "function mmEnsureNode(ctx,s){var p=mmNodeToken(s),n;if(!p)return null;"
+    "n=ctx.map[p.id];if(!n){n={id:p.id,text:p.text,shape:p.shape,order:ctx.nodes.length,level:0};ctx.map[p.id]=n;ctx.nodes.push(n);}"
+    "else{if(p.text&&p.text!==p.id)n.text=p.text;if(n.shape==='rect'&&p.shape!=='rect')n.shape=p.shape;}return n}"
+    "function mmParseStmt(ctx,s){var m,left,right;"
+    "s=mmTrim(s);if(!s)return;"
+    "m=/^(.*?)\\s*(\\-\\.\\->|\\-\\->|\\-\\-\\-|\\=\\=>)(?:\\|([^|]+)\\|)?\\s*(.*)$/.exec(s);"
+    "if(m){left=mmEnsureNode(ctx,m[1]);if(!left)return;right=mmEnsureNode(ctx,m[4]);if(!right)return;"
+    "ctx.edges.push({from:left.id,to:right.id,kind:m[2],label:mmTrim(m[3]||'')});return;}"
+    "mmEnsureNode(ctx,s)}"
+    "function mmParse(src){"
+    "var ctx={dir:'TD',nodes:[],edges:[],map:{}},lines,segs,m,i,j,seenHeader=0;"
+    "/* Safety limit for Mermaid source length. */"
+    "if(!src||src.length>8192)return null;"
+    "lines=src.replace(/\\r/g,'').split('\\n');"
+    "for(i=0;i<lines.length;i++){"
+    "var line=mmTrim(lines[i]);if(!line||line.substr(0,2)==='%%')continue;"
+    "if(!seenHeader){m=/^(graph|flowchart)\\s+(TD|TB|BT|LR|RL)\\b/i.exec(line);if(!m)return null;ctx.dir=m[2].toUpperCase();seenHeader=1;continue;}"
+    "segs=line.split(';');for(j=0;j<segs.length;j++)mmParseStmt(ctx,segs[j]);"
+    "/* Safety limit for Mermaid node count. */"
+    "if(ctx.nodes.length>64)return null;"
+    "/* Safety limit for Mermaid edge count. */"
+    "if(ctx.edges.length>128)return null;}"
+    "if(!seenHeader||ctx.nodes.length===0)return null;"
+    "for(i=0;i<ctx.nodes.length;i++){var changed=0,e,from,to;"
+    "for(j=0;j<ctx.edges.length;j++){e=ctx.edges[j];from=ctx.map[e.from];to=ctx.map[e.to];"
+    "if(from&&to&&to.level<from.level+1){to.level=from.level+1;changed=1;}}"
+    "if(!changed)break;}return ctx}"
+    "function mmSvgEl(name){return document.createElementNS('http://www.w3.org/2000/svg',name)}"
+    "function mmRender(block){"
+    "var srcEl=block.querySelector('.mdv-mermaid-src'),view=block.querySelector('.mdv-mermaid-view'),ctx;"
+    "if(!srcEl||!view)return;ctx=mmParse(srcEl.innerText||srcEl.textContent||'');if(!ctx)return;"
+    "var isHorizontal=(ctx.dir==='LR'||ctx.dir==='RL'),isReverse=(ctx.dir==='BT'||ctx.dir==='RL');"
+    "var levels={},rows=[],maxLevel=0,maxSpan=0,svg=mmSvgEl('svg'),defs=mmSvgEl('defs'),mk=mmSvgEl('marker');"
+    "var baseW=96,baseH=54,charW=7,gapMinor=36,gapMajor=90,padX=28,padY=24;"
+    "var i,j,row,key,rowSpan,canvasW,canvasH,major,n,start,shape,txt,line,sx,sy,ex,ey;"
+    "for(i=0;i<ctx.nodes.length;i++){n=ctx.nodes[i];if(n.level>maxLevel)maxLevel=n.level;"
+    "n.w=Math.max(baseW,Math.min(220,n.text.length*charW+34));n.h=baseH;"
+    "if(n.shape==='circle'){n.w=Math.max(64,Math.min(100,n.text.length*charW+26));n.h=n.w;}"
+    "if(n.shape==='diamond'){n.w=Math.max(110,Math.min(220,n.text.length*charW+40));n.h=64;}"
+    "key=isReverse?(maxLevel-n.level):n.level;if(!levels[key])levels[key]=[];levels[key].push(n);}"
+    "for(i=0;i<=maxLevel;i++){row=levels[i]||[];rows.push(row);rowSpan=0;for(j=0;j<row.length;j++){rowSpan+=row[j].w;}if(row.length>1)rowSpan+=gapMinor*(row.length-1);if(rowSpan>maxSpan)maxSpan=rowSpan;}"
+    "if(isHorizontal){canvasW=padX*2+(maxLevel+1)*(baseW+gapMajor);canvasH=padY*2+Math.max(baseH,maxSpan);}"
+    "else{canvasW=padX*2+Math.max(baseW,maxSpan);canvasH=padY*2+(maxLevel+1)*(baseH+gapMajor);}"
+    "svg.setAttribute('viewBox','0 0 '+canvasW+' '+canvasH);svg.setAttribute('width',canvasW);svg.setAttribute('height',canvasH);svg.setAttribute('preserveAspectRatio','xMidYMin meet');"
+    "mk.setAttribute('id','mdv-mm-arrow');mk.setAttribute('markerWidth','10');mk.setAttribute('markerHeight','10');mk.setAttribute('refX','8');mk.setAttribute('refY','3');mk.setAttribute('orient','auto');"
+    "var path=mmSvgEl('path');path.setAttribute('d','M0,0 L0,6 L9,3 z');path.setAttribute('fill','currentColor');mk.appendChild(path);defs.appendChild(mk);svg.appendChild(defs);"
+    "for(i=0;i<rows.length;i++){row=rows[i];rowSpan=0;for(j=0;j<row.length;j++)rowSpan+=row[j].w;if(row.length>1)rowSpan+=gapMinor*(row.length-1);start=((isHorizontal?canvasH:canvasW)-rowSpan)/2;"
+    "major=(isHorizontal?padX:padY)+i*(isHorizontal?(baseW+gapMajor):(baseH+gapMajor));"
+    "for(j=0;j<row.length;j++){n=row[j];if(isHorizontal){n.x=major+n.w/2;n.y=start+n.h/2;}else{n.x=start+n.w/2;n.y=major+n.h/2;}start+=n.w+gapMinor;}}"
+    "for(i=0;i<ctx.edges.length;i++){var e=ctx.edges[i],from=ctx.map[e.from],to=ctx.map[e.to];if(!from||!to)continue;"
+    "if(isHorizontal){sx=from.x+(ctx.dir==='RL'?-from.w/2:from.w/2);sy=from.y;ex=to.x+(ctx.dir==='RL'?to.w/2:-to.w/2);ey=to.y;}"
+    "else{sx=from.x;sy=from.y+(ctx.dir==='BT'?-from.h/2:from.h/2);ex=to.x;ey=to.y+(ctx.dir==='BT'?to.h/2:-to.h/2);}"
+    "line=mmSvgEl('line');line.setAttribute('x1',sx);line.setAttribute('y1',sy);line.setAttribute('x2',ex);line.setAttribute('y2',ey);"
+    "line.setAttribute('class','mdv-mm-edge'+(e.kind==='-.->'?' dash':'')+(e.kind==='==>'?' bold':''));"
+    "if(e.kind!=='---')line.setAttribute('marker-end','url(#mdv-mm-arrow)');svg.appendChild(line);}"
+    "for(i=0;i<ctx.nodes.length;i++){n=ctx.nodes[i];shape=null;"
+    "if(n.shape==='circle'){shape=mmSvgEl('ellipse');shape.setAttribute('cx',n.x);shape.setAttribute('cy',n.y);shape.setAttribute('rx',n.w/2);shape.setAttribute('ry',n.h/2);}"
+    "else if(n.shape==='diamond'){shape=mmSvgEl('polygon');shape.setAttribute('points',(n.x)+','+(n.y-n.h/2)+' '+(n.x+n.w/2)+','+n.y+' '+n.x+','+(n.y+n.h/2)+' '+(n.x-n.w/2)+','+n.y);}"
+    "else{shape=mmSvgEl('rect');shape.setAttribute('x',n.x-n.w/2);shape.setAttribute('y',n.y-n.h/2);shape.setAttribute('width',n.w);shape.setAttribute('height',n.h);shape.setAttribute('rx',n.shape==='round'?18:6);}"
+    "shape.setAttribute('class','mdv-mm-node');svg.appendChild(shape);"
+    "txt=mmSvgEl('text');txt.setAttribute('x',n.x);txt.setAttribute('y',n.y+4);txt.setAttribute('text-anchor','middle');txt.setAttribute('class','mdv-mm-text');txt.appendChild(document.createTextNode(n.text));svg.appendChild(txt);}"
+    "view.innerHTML='';view.appendChild(svg);block.className+=(block.className?' ':'')+'ok'}"
+    "function initMermaid(){var blocks=document.querySelectorAll('.mdv-mermaid[data-mdv-mermaid]');for(var i=0;i<blocks.length;i++)mmRender(blocks[i])}"
+    "function mmApplySvgTextStyle(el){var cs,fz,ff;if(!el)return;cs=window.getComputedStyle?window.getComputedStyle(document.body,null):null;"
+    "ff=cs&&cs.fontFamily?cs.fontFamily:document.body.style.fontFamily;fz=cs&&cs.fontSize?cs.fontSize:document.body.style.fontSize;"
+    "if(ff){el.style.fontFamily=ff;try{el.setAttribute('font-family',ff);}catch(ex){}}"
+    "if(fz){el.style.fontSize=fz;try{el.setAttribute('font-size',fz);}catch(ex){}}}"
+    "function mmWrapWords(text,maxChars){var words,lines,line,i,w;if(!text)return[''];if(!(maxChars>4))maxChars=16;"
+    "words=mmTrim(text).split(/\\s+/);lines=[];line='';for(i=0;i<words.length;i++){w=words[i];"
+    "if(!line){line=w;continue;}if((line+' '+w).length<=maxChars)line+=' '+w;else{lines.push(line);line=w;}}"
+    "if(line)lines.push(line);if(lines.length===0)lines.push(text);return lines;}"
+    "function mmPushText(svg,x,y,lines,cls,anchor){"
+    "var step=Math.max(16,Math.round(mmBodyFontPx()*1.25));"
+    "for(var i=0;i<lines.length;i++){var t=mmSvgEl('text');t.setAttribute('x',x);t.setAttribute('y',y+i*step);t.setAttribute('text-anchor',anchor||'middle');t.setAttribute('class',cls);mmApplySvgTextStyle(t);t.appendChild(document.createTextNode(lines[i]));svg.appendChild(t);}}"
+    "function mmSlotOffset(index,step){if(index<=0)return 0;var n=Math.floor((index+1)/2);return (index%2?1:-1)*n*step;}"
+    "function mmParseFlow(src){"
+    "var ctx={kind:'flow',dir:'TD',nodes:[],edges:[],map:{}},lines,segs,m,i,j,seenHeader=0;"
+    "if(!src||src.length>8192)return null;lines=src.replace(/\\r/g,'').split('\\n');"
+    "for(i=0;i<lines.length;i++){var line=mmTrim(lines[i]);if(!line||line.substr(0,2)==='%%')continue;"
+    "if(!seenHeader){m=/^(graph|flowchart)\\s+(TD|TB|BT|LR|RL)\\b/i.exec(line);if(!m)return null;ctx.dir=m[2].toUpperCase();seenHeader=1;continue;}"
+    "segs=line.split(';');for(j=0;j<segs.length;j++)mmParseStmt(ctx,segs[j]);if(ctx.nodes.length>64||ctx.edges.length>128)return null;}"
+    "if(!seenHeader||ctx.nodes.length===0)return null;"
+    "for(i=0;i<ctx.nodes.length;i++){var changed=0,e,from,to;for(j=0;j<ctx.edges.length;j++){e=ctx.edges[j];from=ctx.map[e.from];to=ctx.map[e.to];if(from&&to&&to.level<from.level+1){to.level=from.level+1;changed=1;}}if(!changed)break;}return ctx}"
+    "function mmRenderFlow(view,ctx){"
+    "var isHorizontal=(ctx.dir==='LR'||ctx.dir==='RL'),isReverse=(ctx.dir==='BT'||ctx.dir==='RL');"
+    "var levels={},rows=[],maxLevel=0,maxSpan=0,svg=mmSvgEl('svg'),defs=mmSvgEl('defs'),mk=mmSvgEl('marker');"
+    "var fontPx=mmBodyFontPx(),baseW=Math.max(96,Math.round(fontPx*6.0)),baseH=Math.max(54,Math.round(fontPx*2.9)),charW=fontPx*0.58,gapMinor=Math.max(36,Math.round(fontPx*2.0)),gapMajor=Math.max(90,Math.round(fontPx*4.8)),padX=Math.max(28,Math.round(fontPx*1.6)),padY=Math.max(24,Math.round(fontPx*1.4));"
+    "var i,j,row,key,rowSpan,canvasW,canvasH,major,n,start,shape,txt,line,sx,sy,ex,ey;"
+    "for(i=0;i<ctx.nodes.length;i++){n=ctx.nodes[i];if(n.level>maxLevel)maxLevel=n.level;n.w=Math.max(baseW,Math.min(320,Math.round(n.text.length*charW+fontPx*2.0)));n.h=baseH;"
+    "if(n.shape==='circle'){n.w=Math.max(Math.round(fontPx*4.2),Math.min(Math.round(fontPx*6.0),Math.round(n.text.length*charW+fontPx*1.6)));n.h=n.w;}if(n.shape==='diamond'){n.w=Math.max(Math.round(fontPx*6.2),Math.min(320,Math.round(n.text.length*charW+fontPx*2.3)));n.h=Math.max(64,Math.round(fontPx*3.4));}"
+    "key=isReverse?(maxLevel-n.level):n.level;if(!levels[key])levels[key]=[];levels[key].push(n);}"
+    "for(i=0;i<=maxLevel;i++){row=levels[i]||[];rows.push(row);rowSpan=0;for(j=0;j<row.length;j++)rowSpan+=row[j].w;if(row.length>1)rowSpan+=gapMinor*(row.length-1);if(rowSpan>maxSpan)maxSpan=rowSpan;}"
+    "if(isHorizontal){canvasW=padX*2+(maxLevel+1)*(baseW+gapMajor);canvasH=padY*2+Math.max(baseH,maxSpan);}else{canvasW=padX*2+Math.max(baseW,maxSpan);canvasH=padY*2+(maxLevel+1)*(baseH+gapMajor);}"
+    "svg.setAttribute('viewBox','0 0 '+canvasW+' '+canvasH);svg.setAttribute('width',canvasW);svg.setAttribute('height',canvasH);"
+    "mk.setAttribute('id','mdv-mm-arrow');mk.setAttribute('markerWidth','10');mk.setAttribute('markerHeight','10');mk.setAttribute('refX','8');mk.setAttribute('refY','3');mk.setAttribute('orient','auto');"
+    "path=mmSvgEl('path');path.setAttribute('d','M0,0 L0,6 L9,3 z');path.setAttribute('fill','currentColor');mk.appendChild(path);defs.appendChild(mk);svg.appendChild(defs);"
+    "for(i=0;i<rows.length;i++){row=rows[i];rowSpan=0;for(j=0;j<row.length;j++)rowSpan+=row[j].w;if(row.length>1)rowSpan+=gapMinor*(row.length-1);start=((isHorizontal?canvasH:canvasW)-rowSpan)/2;major=(isHorizontal?padX:padY)+i*(isHorizontal?(baseW+gapMajor):(baseH+gapMajor));"
+    "for(j=0;j<row.length;j++){n=row[j];if(isHorizontal){n.x=major+n.w/2;n.y=start+n.h/2;}else{n.x=start+n.w/2;n.y=major+n.h/2;}start+=n.w+gapMinor;}}"
+    "for(i=0;i<ctx.edges.length;i++){var e=ctx.edges[i],from=ctx.map[e.from],to=ctx.map[e.to];if(!from||!to)continue;"
+    "if(isHorizontal){sx=from.x+(ctx.dir==='RL'?-from.w/2:from.w/2);sy=from.y;ex=to.x+(ctx.dir==='RL'?to.w/2:-to.w/2);ey=to.y;}else{sx=from.x;sy=from.y+(ctx.dir==='BT'?-from.h/2:from.h/2);ex=to.x;ey=to.y+(ctx.dir==='BT'?to.h/2:-to.h/2);}"
+    "line=mmSvgEl('line');line.setAttribute('x1',sx);line.setAttribute('y1',sy);line.setAttribute('x2',ex);line.setAttribute('y2',ey);line.setAttribute('class','mdv-mm-edge'+(e.kind==='-.->'?' dash':'')+(e.kind==='==>'?' bold':''));if(e.kind!=='---')line.setAttribute('marker-end','url(#mdv-mm-arrow)');svg.appendChild(line);"
+    "if(e.label)mmPushText(svg,(sx+ex)/2,(sy+ey)/2-8,[e.label],'mdv-mm-text');}"
+    "for(i=0;i<ctx.nodes.length;i++){n=ctx.nodes[i];shape=null;if(n.shape==='circle'){shape=mmSvgEl('ellipse');shape.setAttribute('cx',n.x);shape.setAttribute('cy',n.y);shape.setAttribute('rx',n.w/2);shape.setAttribute('ry',n.h/2);}else if(n.shape==='diamond'){shape=mmSvgEl('polygon');shape.setAttribute('points',(n.x)+','+(n.y-n.h/2)+' '+(n.x+n.w/2)+','+n.y+' '+n.x+','+(n.y+n.h/2)+' '+(n.x-n.w/2)+','+n.y);}else{shape=mmSvgEl('rect');shape.setAttribute('x',n.x-n.w/2);shape.setAttribute('y',n.y-n.h/2);shape.setAttribute('width',n.w);shape.setAttribute('height',n.h);shape.setAttribute('rx',n.shape==='round'?18:6);}shape.setAttribute('class','mdv-mm-node');svg.appendChild(shape);txt=mmSvgEl('text');txt.setAttribute('x',n.x);txt.setAttribute('y',n.y+4);txt.setAttribute('text-anchor','middle');txt.setAttribute('class','mdv-mm-text');mmApplySvgTextStyle(txt);txt.appendChild(document.createTextNode(n.text));svg.appendChild(txt);}"
+    "view.innerHTML='';view.appendChild(svg);return 1}"
+    "function mmSeqActor(ctx,name,label){var a;if(!name)return null;a=ctx.map[name];if(!a){a={id:name,label:label||name,index:ctx.actors.length};ctx.map[name]=a;ctx.actors.push(a);}else if(label)a.label=label;return a}"
+    "function mmParseSequence(src){"
+    "var ctx={kind:'sequence',actors:[],map:{},items:[]},lines,m,i,line,a,b;"
+    "if(!src||src.length>8192)return null;lines=src.replace(/\\r/g,'').split('\\n');"
+    "for(i=0;i<lines.length;i++){line=mmTrim(lines[i]);if(!line||line.substr(0,2)==='%%')continue;if(i===0){if(!/^sequenceDiagram\\b/i.test(line))return null;continue;}"
+    "if((m=/^(participant|actor)\\s+([A-Za-z0-9_:-]+)(?:\\s+as\\s+(.+))?$/i.exec(line))){mmSeqActor(ctx,m[2],mmTrim(m[3]||m[2]));continue;}"
+    "if((m=/^Note\\s+(right|left)\\s+of\\s+([A-Za-z0-9_:-]+)\\s*:\\s*(.+)$/i.exec(line))){a=mmSeqActor(ctx,m[2],m[2]);ctx.items.push({type:'note',side:m[1].toLowerCase(),actor:a.id,text:mmTrim(m[3])});continue;}"
+    "if((m=/^([A-Za-z0-9_:-]+?)\\s*(-->>|-->|->>|->|==>>|==>)\\s*([A-Za-z0-9_:-]+)\\s*:\\s*(.+)$/i.exec(line))){a=mmSeqActor(ctx,m[1],m[1]);b=mmSeqActor(ctx,m[3],m[3]);ctx.items.push({type:'msg',from:a.id,to:b.id,kind:m[2],text:mmTrim(m[4])});continue;}}"
+    "if(ctx.actors.length===0||ctx.actors.length>16||ctx.items.length>96)return null;return ctx}"
+    "function mmRenderSequence(view,ctx){"
+    "var svg=mmSvgEl('svg'),defs=mmSvgEl('defs'),mk=mmSvgEl('marker'),path=mmSvgEl('path');"
+    "var fontPx=mmBodyFontPx(),padX=Math.max(44,Math.round(fontPx*2.5)),topY=Math.max(34,Math.round(fontPx*1.9)),boxW=Math.max(120,Math.round(fontPx*7.2)),boxH=Math.max(44,Math.round(fontPx*2.7)),colGap=Math.max(96,Math.round(fontPx*5.8)),rowGap=Math.max(58,Math.round(fontPx*3.4)),bodyTop=topY+boxH+Math.max(26,Math.round(fontPx*1.6)),noteLane=Math.max(110,Math.round(fontPx*7.0));"
+    "var width=padX*2+noteLane*2+ctx.actors.length*boxW+(ctx.actors.length-1)*colGap,height=bodyTop+ctx.items.length*rowGap+boxH+34;"
+    "var i,a,x,y,line,msg,note,t,rect;"
+    "svg.setAttribute('viewBox','0 0 '+width+' '+height);svg.setAttribute('width',width);svg.setAttribute('height',height);svg.setAttribute('preserveAspectRatio','xMidYMin meet');"
+    "mk.setAttribute('id','mdv-mm-arrow');mk.setAttribute('markerWidth','10');mk.setAttribute('markerHeight','10');mk.setAttribute('refX','8');mk.setAttribute('refY','3');mk.setAttribute('orient','auto');path.setAttribute('d','M0,0 L0,6 L9,3 z');path.setAttribute('fill','currentColor');mk.appendChild(path);defs.appendChild(mk);svg.appendChild(defs);"
+    "for(i=0;i<ctx.actors.length;i++){a=ctx.actors[i];a.cx=padX+noteLane+i*(boxW+colGap)+boxW/2;rect=mmSvgEl('rect');rect.setAttribute('x',a.cx-boxW/2);rect.setAttribute('y',topY);rect.setAttribute('width',boxW);rect.setAttribute('height',boxH);rect.setAttribute('rx','5');rect.setAttribute('class','mdv-mm-node');svg.appendChild(rect);mmPushText(svg,a.cx,topY+27,[a.label],'mdv-mm-text');line=mmSvgEl('line');line.setAttribute('x1',a.cx);line.setAttribute('y1',topY+boxH);line.setAttribute('x2',a.cx);line.setAttribute('y2',height-boxH-10);line.setAttribute('class','mdv-mm-life');svg.appendChild(line);}"
+    "for(i=0;i<ctx.items.length;i++){y=bodyTop+i*rowGap;msg=ctx.items[i];if(msg.type==='msg'){var from=ctx.map[msg.from],to=ctx.map[msg.to];if(!from||!to)continue;line=mmSvgEl('line');line.setAttribute('x1',from.cx);line.setAttribute('y1',y);line.setAttribute('x2',to.cx);line.setAttribute('y2',y);line.setAttribute('class','mdv-mm-edge'+(msg.kind.indexOf('--')>=0?' dash':''));line.setAttribute('marker-end','url(#mdv-mm-arrow)');svg.appendChild(line);mmPushText(svg,(from.cx+to.cx)/2,y-Math.max(8,Math.round(fontPx*0.45)),[msg.text],'mdv-mm-text');}else if(msg.type==='note'){var noteLines,noteW,noteH,notePad=Math.max(10,Math.round(fontPx*0.6));a=ctx.map[msg.actor];if(!a)continue;noteLines=mmWrapWords(msg.text,Math.max(10,Math.round(fontPx*0.95)));noteW=Math.max(110,Math.round(fontPx*7.2));noteH=Math.max(40,notePad*2+noteLines.length*Math.max(16,Math.round(fontPx*1.25)));x=a.cx+(msg.side==='right'?Math.round(fontPx*4.0):-Math.round(fontPx*4.0));note=mmSvgEl('rect');note.setAttribute('x',x-(msg.side==='right'?0:noteW));note.setAttribute('y',y-Math.round(noteH/2));note.setAttribute('width',noteW);note.setAttribute('height',noteH);note.setAttribute('rx','3');note.setAttribute('class','mdv-mm-note');svg.appendChild(note);mmPushText(svg,msg.side==='right'?(x+notePad):(x-notePad),y-Math.round(noteH/2)+notePad+Math.max(12,Math.round(fontPx*0.8)),noteLines,'mdv-mm-note-text',msg.side==='right'?'start':'end');}}"
+    "view.innerHTML='';view.appendChild(svg);return 1}"
+    "function mmClassGet(ctx,name){var c=ctx.map[name];if(!c){c={id:name,title:name,members:[]};ctx.map[name]=c;ctx.classes.push(c);}return c}"
+    "function mmParseClass(src){"
+    "var ctx={kind:'class',classes:[],edges:[],map:{}},lines,i,line,m,inClass=null;"
+    "if(!src||src.length>8192)return null;lines=src.replace(/\\r/g,'').split('\\n');"
+    "for(i=0;i<lines.length;i++){line=mmTrim(lines[i]);if(!line||line.substr(0,2)==='%%')continue;if(i===0){if(!/^classDiagram\\b/i.test(line))return null;continue;}"
+    "if(inClass&&line==='}'){inClass=null;continue;}if(inClass){inClass.members.push(line);continue;}"
+    "if((m=/^class\\s+([A-Za-z0-9_:-]+)\\s*\\{$/.exec(line))){inClass=mmClassGet(ctx,m[1]);continue;}"
+    "if((m=/^class\\s+([A-Za-z0-9_:-]+)$/.exec(line))){mmClassGet(ctx,m[1]);continue;}"
+    "if((m=/^([A-Za-z0-9_:-]+)\\s*:\\s*(.+)$/.exec(line))){mmClassGet(ctx,m[1]).members.push(mmTrim(m[2]));continue;}"
+    "if((m=/^([A-Za-z0-9_:-]+)\\s+([.<|o*\\->]+)\\s+([A-Za-z0-9_:-]+)(?:\\s*:\\s*(.+))?$/.exec(line))){mmClassGet(ctx,m[1]);mmClassGet(ctx,m[3]);ctx.edges.push({from:m[1],to:m[3],kind:m[2],label:mmTrim(m[4]||'')});continue;}}"
+    "if(ctx.classes.length===0||ctx.classes.length>24||ctx.edges.length>64)return null;return ctx}"
+    "function mmRenderClass(view,ctx){"
+    "var fontPx=mmBodyFontPx(),cols=Math.min(3,Math.max(1,ctx.classes.length)),boxW=Math.max(190,Math.round(fontPx*11.0)),rowH=Math.max(128,Math.round(fontPx*7.4)),padX=Math.max(28,Math.round(fontPx*1.6)),padY=Math.max(26,Math.round(fontPx*1.5)),gapX=Math.max(38,Math.round(fontPx*2.2)),gapY=Math.max(34,Math.round(fontPx*2.0));"
+    "var rows=Math.ceil(ctx.classes.length/cols),width=padX*2+cols*boxW+(cols-1)*gapX,height=padY*2+rows*rowH+(rows-1)*gapY;"
+    "var svg=mmSvgEl('svg'),defs=mmSvgEl('defs'),mk=mmSvgEl('marker'),path=mmSvgEl('path'),i,c,r,x,y,rect,line,rowLabelSlots={},gapSlots={};"
+    "svg.setAttribute('viewBox','0 0 '+width+' '+height);svg.setAttribute('width',width);svg.setAttribute('height',height);svg.setAttribute('preserveAspectRatio','xMidYMin meet');mk.setAttribute('id','mdv-mm-arrow');mk.setAttribute('markerWidth','10');mk.setAttribute('markerHeight','10');mk.setAttribute('refX','8');mk.setAttribute('refY','3');mk.setAttribute('orient','auto');path.setAttribute('d','M0,0 L0,6 L9,3 z');path.setAttribute('fill','currentColor');mk.appendChild(path);defs.appendChild(mk);svg.appendChild(defs);"
+    "for(i=0;i<ctx.classes.length;i++){c=ctx.classes[i];r=Math.floor(i/cols);x=padX+(i%cols)*(boxW+gapX);y=padY+r*(rowH+gapY);c.row=r;c.col=(i%cols);c.x=x;c.y=y;c.w=boxW;c.cx=x+boxW/2;c.h=Math.max(Math.round(fontPx*4.0),Math.round(fontPx*4.0)+Math.min(5,c.members.length)*Math.round(fontPx*1.25));c.cy=y+c.h/2;rect=mmSvgEl('rect');rect.setAttribute('x',x);rect.setAttribute('y',y);rect.setAttribute('width',boxW);rect.setAttribute('height',c.h);rect.setAttribute('rx','6');rect.setAttribute('class','mdv-mm-node');svg.appendChild(rect);line=mmSvgEl('line');line.setAttribute('x1',x);line.setAttribute('y1',y+Math.round(fontPx*1.9));line.setAttribute('x2',x+boxW);line.setAttribute('y2',y+Math.round(fontPx*1.9));line.setAttribute('class','mdv-mm-edge');svg.appendChild(line);mmPushText(svg,c.cx,y+Math.round(fontPx*1.35),[c.title],'mdv-mm-text');for(r=0;r<Math.min(5,c.members.length);r++)mmPushText(svg,c.cx,y+Math.round(fontPx*3.15)+r*Math.round(fontPx*1.25),[c.members[r]],'mdv-mm-text');}"
+    "for(i=0;i<ctx.edges.length;i++){var e=ctx.edges[i],from=ctx.map[e.from],to=ctx.map[e.to],dx,dy,x1,y1,x2,y2,lx,ly,midY,p,rowKey,rowSlot,gapKey,slotIndex,slotOffset;if(!from||!to)continue;dx=to.cx-from.cx;dy=to.cy-from.cy;"
+    "if(from.row===to.row){rowKey='r'+from.row+'-'+(dx>=0?'f':'b');rowSlot=rowLabelSlots[rowKey]||0;rowLabelSlots[rowKey]=rowSlot+1;"
+    "x1=from.cx+(dx>=0?from.w/2:-from.w/2);y1=from.cy;x2=to.cx-(dx>=0?to.w/2:-to.w/2);y2=to.cy;lx=(x1+x2)/2+((dx>=0)?1:-1)*rowSlot*Math.max(14,Math.round(fontPx*1.0));ly=(y1+y2)/2-Math.max(10,Math.round(fontPx*0.6))-rowSlot*Math.max(14,Math.round(fontPx*1.1));"
+    "line=mmSvgEl('line');line.setAttribute('x1',x1);line.setAttribute('y1',y1);line.setAttribute('x2',x2);line.setAttribute('y2',y2);line.setAttribute('class','mdv-mm-edge'+(e.kind.indexOf('..')>=0?' dash':''));if(e.kind.indexOf('>')>=0||e.kind.indexOf('|>')>=0)line.setAttribute('marker-end','url(#mdv-mm-arrow)');svg.appendChild(line);if(e.label)mmPushText(svg,lx,ly,[e.label],'mdv-mm-text','middle');}"
+    "else{x1=from.cx;y1=from.cy+(dy>=0?from.h/2:-from.h/2);x2=to.cx;y2=to.cy-(dy>=0?to.h/2:-to.h/2);gapKey=(Math.min(from.row,to.row))+'-'+(Math.max(from.row,to.row));slotIndex=gapSlots[gapKey]||0;gapSlots[gapKey]=slotIndex+1;slotOffset=mmSlotOffset(slotIndex,Math.max(14,Math.round(fontPx*1.0)));"
+    "midY=(dy>=0)?Math.round(from.y+from.h+((to.y-(from.y+from.h))/2)+slotOffset):Math.round(to.y+to.h+((from.y-(to.y+to.h))/2)+slotOffset);"
+    "p=mmSvgEl('path');p.setAttribute('d','M'+x1+','+y1+' L'+x1+','+midY+' L'+x2+','+midY+' L'+x2+','+y2);p.setAttribute('class','mdv-mm-edge'+(e.kind.indexOf('..')>=0?' dash':''));if(e.kind.indexOf('>')>=0||e.kind.indexOf('|>')>=0)p.setAttribute('marker-end','url(#mdv-mm-arrow)');svg.appendChild(p);"
+    "if(e.label){lx=Math.round((x1+x2)/2);ly=midY-(slotOffset>=0?Math.max(10,Math.round(fontPx*0.6)):Math.max(14,Math.round(fontPx*0.85)));mmPushText(svg,lx,ly,[e.label],'mdv-mm-text','middle');}}}"
+    "view.innerHTML='';view.appendChild(svg);return 1}"
+    "function mmStateNode(ctx,name,label){var n,id=name;if(name==='[*]'){id='[*]#'+(++ctx.autoId);n={id:id,label:label||'',pseudo:1};ctx.map[id]=n;ctx.states.push(n);return n;}n=ctx.map[id];if(!n){n={id:id,label:label||id,pseudo:0};ctx.map[id]=n;ctx.states.push(n);}else if(label)n.label=label;return n}"
+    "function mmParseState(src){"
+    "var ctx={kind:'state',states:[],edges:[],map:{},autoId:0},lines,i,line,m,a,b;"
+    "if(!src||src.length>8192)return null;lines=src.replace(/\\r/g,'').split('\\n');"
+    "for(i=0;i<lines.length;i++){line=mmTrim(lines[i]);if(!line||line.substr(0,2)==='%%')continue;if(i===0){if(!/^stateDiagram(?:-v2)?\\b/i.test(line))return null;continue;}"
+    "if((m=/^state\\s+\"([^\"]+)\"\\s+as\\s+([A-Za-z0-9_:-]+)$/i.exec(line))){mmStateNode(ctx,m[2],m[1]);continue;}"
+    "if((m=/^(\\[\\*\\]|[A-Za-z0-9_:-]+)\\s*--?>\\s*(\\[\\*\\]|[A-Za-z0-9_:-]+)(?:\\s*:\\s*(.+))?$/i.exec(line))){a=mmStateNode(ctx,m[1],m[1]==='[*]'?'':m[1]);b=mmStateNode(ctx,m[2],m[2]==='[*]'?'':m[2]);ctx.edges.push({from:a.id,to:b.id,label:mmTrim(m[3]||'')});continue;}"
+    "if((m=/^([A-Za-z0-9_:-]+)$/.exec(line))){mmStateNode(ctx,m[1],m[1]);continue;}}"
+    "if(ctx.states.length===0||ctx.states.length>24||ctx.edges.length>64)return null;return ctx}"
+    "function mmRenderState(view,ctx){"
+    "var fontPx=mmBodyFontPx(),cols=(ctx.states.length>8?2:1),boxW=Math.max(140,Math.round(fontPx*8.4)),rowH=Math.max(90,Math.round(fontPx*5.4)),padX=Math.max(28,Math.round(fontPx*1.6)),padY=Math.max(24,Math.round(fontPx*1.4)),gapX=Math.max(42,Math.round(fontPx*2.5)),gapY=Math.max(34,Math.round(fontPx*2.0)),labelLane=Math.max(96,Math.round(fontPx*6.0));"
+    "var rows=Math.ceil(ctx.states.length/cols),width=padX*2+labelLane*2+cols*boxW+(cols-1)*gapX,height=padY*2+rows*rowH+(rows-1)*gapY;"
+    "var svg=mmSvgEl('svg'),defs=mmSvgEl('defs'),mk=mmSvgEl('marker'),path=mmSvgEl('path'),i,s,x,y,shape,line;"
+    "svg.setAttribute('viewBox','0 0 '+width+' '+height);svg.setAttribute('width',width);svg.setAttribute('height',height);svg.setAttribute('preserveAspectRatio','xMidYMin meet');mk.setAttribute('id','mdv-mm-arrow');mk.setAttribute('markerWidth','10');mk.setAttribute('markerHeight','10');mk.setAttribute('refX','8');mk.setAttribute('refY','3');mk.setAttribute('orient','auto');path.setAttribute('d','M0,0 L0,6 L9,3 z');path.setAttribute('fill','currentColor');mk.appendChild(path);defs.appendChild(mk);svg.appendChild(defs);"
+    "for(i=0;i<ctx.states.length;i++){var boxH=Math.max(52,Math.round(fontPx*3.1)),pr=Math.max(10,Math.round(fontPx*0.65));s=ctx.states[i];s.index=i;x=padX+labelLane+(i%cols)*(boxW+gapX);y=padY+Math.floor(i/cols)*(rowH+gapY);s.x=x;s.y=y;s.w=boxW;"
+    "if(s.pseudo){s.r=pr;s.cx=x+boxW/2;s.cy=y+pr+2;shape=mmSvgEl('circle');shape.setAttribute('cx',s.cx);shape.setAttribute('cy',s.cy);shape.setAttribute('r',s.r);shape.setAttribute('class','mdv-mm-node');svg.appendChild(shape);}"
+    "else{s.h=boxH;s.cx=x+boxW/2;s.cy=y+boxH/2;shape=mmSvgEl('rect');shape.setAttribute('x',x);shape.setAttribute('y',y);shape.setAttribute('width',boxW);shape.setAttribute('height',boxH);shape.setAttribute('rx',Math.max(16,Math.round(fontPx*1.0)));shape.setAttribute('class','mdv-mm-node');svg.appendChild(shape);mmPushText(svg,s.cx,y+Math.round(fontPx*1.85),[s.label],'mdv-mm-text');}}"
+    "for(i=0;i<ctx.edges.length;i++){var e=ctx.edges[i],from=ctx.map[e.from],to=ctx.map[e.to],x1,y1,x2,y2,lx,ly,startX,startY,endX,endY,railX,p;if(!from||!to)continue;"
+    "if(from.pseudo){x1=from.cx;y1=from.cy+from.r;}else{x1=from.cx;y1=from.y+from.h;}"
+    "if(to.pseudo){x2=to.cx;y2=to.cy-to.r;}else{x2=to.cx;y2=to.y;}"
+    "if(from.cx===to.cx&&from.index!=null&&to.index!=null&&to.index===from.index+1){"
+    "line=mmSvgEl('line');line.setAttribute('x1',x1);line.setAttribute('y1',y1);line.setAttribute('x2',x2);line.setAttribute('y2',y2);line.setAttribute('class','mdv-mm-edge');line.setAttribute('marker-end','url(#mdv-mm-arrow)');svg.appendChild(line);"
+    "if(e.label)mmPushText(svg,padX,y1+Math.round((y2-y1)/2)-Math.max(4,Math.round(fontPx*0.2)),[e.label],'mdv-mm-text','start');}"
+    "else{startX=from.pseudo?(from.cx+from.r):(from.x+from.w);startY=from.pseudo?from.cy:from.cy;endX=to.pseudo?(to.cx+to.r):(to.x+to.w);endY=to.pseudo?to.cy:to.cy;railX=Math.max(startX,endX)+Math.max(38,Math.round(fontPx*2.4));"
+    "p=mmSvgEl('path');p.setAttribute('d','M'+startX+','+startY+' L'+railX+','+startY+' L'+railX+','+endY+' L'+endX+','+endY);p.setAttribute('class','mdv-mm-edge');p.setAttribute('marker-end','url(#mdv-mm-arrow)');svg.appendChild(p);"
+    "if(e.label)mmPushText(svg,railX+Math.max(18,Math.round(fontPx*1.1)),startY+Math.round((endY-startY)/2),[e.label],'mdv-mm-text','start');}}"
+    "view.innerHTML='';view.appendChild(svg);return 1}"
+    "function mmParse(src){"
+    "var first;if(!src||src.length>8192)return null;first=mmTrim(src.replace(/\\r/g,'').split('\\n')[0]||'');"
+    "if(/^sequenceDiagram\\b/i.test(first))return mmParseSequence(src);"
+    "if(/^classDiagram\\b/i.test(first))return mmParseClass(src);"
+    "if(/^stateDiagram(?:-v2)?\\b/i.test(first))return mmParseState(src);"
+    "if(/^(graph|flowchart)\\b/i.test(first))return mmParseFlow(src);"
+    "return null}"
+    "function mmRender(block){"
+    "var srcEl=block.querySelector('.mdv-mermaid-src'),view=block.querySelector('.mdv-mermaid-view'),ctx,ok=0;"
+    "if(!srcEl||!view)return;ctx=mmParse(srcEl.innerText||srcEl.textContent||'');if(!ctx)return;"
+    "if(ctx.kind==='flow')ok=mmRenderFlow(view,ctx);"
+    "else if(ctx.kind==='sequence')ok=mmRenderSequence(view,ctx);"
+    "else if(ctx.kind==='class')ok=mmRenderClass(view,ctx);"
+    "else if(ctx.kind==='state')ok=mmRenderState(view,ctx);"
+    "if(ok){block.className+=(block.className?' ':'')+'ok';syncMermaidTypography();if(window.setTimeout)window.setTimeout(syncMermaidTypography,0);}}"
+    "function initMermaid(){var blocks=document.querySelectorAll('.mdv-mermaid[data-mdv-mermaid]');for(var i=0;i<blocks.length;i++)mmRender(blocks[i])}"
     "function pd(e){if(e.preventDefault)e.preventDefault();else e.returnValue=false}"
     "document.onkeydown=function(e){"
     "e=e||window.event;var c=e.ctrlKey||e.metaKey,k=e.keyCode;"
@@ -1486,12 +1837,20 @@ static void build_js(StrBuf* sb) {
     "if(k===112||(c&&k===191)){pd(e);th();return false}"
     "if(k===27){hf();document.getElementById('mdv-toc').className='';document.body.style.marginRight='0';"
     "document.getElementById('mdv-help').className='';return false}"
+    "if(k===13&&document.activeElement===document.getElementById('mdv-fi')){"
+    "pd(e);if(e.shiftKey)fp();else fn();return false}"
     "};"
 
     /* Init */
+    "window.onresize=function(){syncMermaidTypography()};"
     "window.onload=function(){"
-    "shAll();initCollapse();"
-    "shAll();initCollapse();"
+    "var inp=document.getElementById('mdv-fi');if(inp){"
+    "var trig=function(){var s=inp;if(s._db)clearTimeout(s._db);"
+    "s._db=setTimeout(function(){df(s.value,0,0)},200)};"
+    "inp.onkeyup=trig;"
+    "inp.oninput=trig;"
+    "}"
+    "initMermaid();shAll();initCollapse();"
     "if(ln)tl();"  /* apply line numbers if saved */
     "up()};"
     "</script>");
@@ -1514,6 +1873,7 @@ static const char* get_ui(void) {
     "<div id=\"mdv-help\">"
     "<h3>MDView Keyboard Shortcuts</h3>"
 
+    "<div class=\"hrow\"><span>Copy to Clipboard</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">C</span></span></div>"
     "<div class=\"hrow\"><span>Zoom in</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">+</span></span></div>"
     "<div class=\"hrow\"><span>Zoom out</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">&minus;</span></span></div>"
     "<div class=\"hrow\"><span>Reset zoom</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">0</span></span></div>"
@@ -1523,32 +1883,80 @@ static const char* get_ui(void) {
     "<div class=\"hrow\"><span>Narrow columns</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">Shift</span><span class=\"kc-plus\">+</span><span class=\"kc\">W</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
+    "<div class=\"hrow\"><span>Split view markdown + raw </span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">M</span></span></div>"
     "<div class=\"hrow\"><span>Toggle dark / light</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">D</span></span></div>"
     "<div class=\"hrow\"><span>Line numbers</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">L</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
     "<div class=\"hrow\"><span>Table of Contents</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">T</span></span></div>"
-    "<div class=\"hrow\"><span>Find in page</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">F</span></span></div>"
     "<div class=\"hrow\"><span>Print</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">P</span></span></div>"
     "<div class=\"hrow\"><span>Go to top</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">G</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
-    "<div class=\"hrow\"><span>Copy</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">C</span></span></div>"
-    "<div class=\"hrow\"><span>Select all</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">A</span></span></div>"
-    "<div class=\"hrow\"><span>Split source view</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">M</span></span></div>"
+    "<div class=\"hrow\"><span>Find in page</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">F</span></span></div>"
+    "<div class=\"hrow\"><span>Select all in active view</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">A</span></span></div>"
+    "<div class=\"hrow\"><span>Continue Find forward</span><span class=\"hkeys\"><span class=\"kc\">F3</span></span></div>"
+    "<div class=\"hrow\"><span>Continue Find backward</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">F3</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
     "<div class=\"hrow\"><span>Close viewer</span><span class=\"hkeys\"><span class=\"kc\">Esc</span></span></div>"
     "<div class=\"hrow\"><span>This help</span><span class=\"hkeys\"><span class=\"kc\">F1</span></span></div>"
+    "<div class=\"help-sep\"></div>"
 
-    "<div class=\"help-foot\">MDView v2.3 &middot; Settings auto-saved &middot; Press Esc to close</div>"
+    "<div class=\"help-foot\">MDView v2.2 &middot; Settings auto-saved &middot; Press Esc to close</div>"
     "</div>";
+}
+
+/* ── Lister search integration (Ctrl+F / F3 / Shift+F3) ─────────────── */
+
+/* WLX SDK search flags (ListSearchText searchParameter) */
+#ifndef LCS_FINDFIRST
+    #define LCS_FINDFIRST   1
+    #define LCS_MATCHCASE   2
+    #define LCS_WHOLEWORDS  4
+    #define LCS_BACKWARDS   8
+#endif
+
+static void js_find_apply(MDViewData* d, const wchar_t* needle, int matchCase, int wholeWords) {
+    if (!d || !d->pBrowser) return;
+    if (!needle) needle = L"";
+
+    /*
+       Push the search string into the find bar input, then call df(...).
+       We escape backslashes and quotes to keep the JS string valid.
+    */
+    wchar_t esc[1024];
+    size_t oi = 0;
+    for (const wchar_t* p = needle; *p && oi + 2 < (sizeof(esc) / sizeof(esc[0])); ++p) {
+        if (*p == L'\\' || *p == L'\'' ) {
+            esc[oi++] = L'\\';
+        }
+        if (*p == L'\r') { esc[oi++] = L'\\'; esc[oi++] = L'r'; continue; }
+        if (*p == L'\n') { esc[oi++] = L'\\'; esc[oi++] = L'n'; continue; }
+        esc[oi++] = *p;
+    }
+    esc[oi] = 0;
+
+    wchar_t js[1400];
+    _snwprintf_s(js, _countof(js), _TRUNCATE,
+        L"(function(){var i=document.getElementById('mdv-fi');"
+        L"if(i){i.value='%s';}"
+        L"if(typeof df==='function'){df('%s',%d,%d);}"
+        L"})();",
+        esc, esc, matchCase ? 1 : 0, wholeWords ? 1 : 0);
+
+    exec_js(d->pBrowser, js);
+}
+
+static void js_find_step(MDViewData* d, int backwards) {
+    if (!d || !d->pBrowser) return;
+    exec_js(d->pBrowser, backwards ? L"fp()" : L"fn()" );
 }
 
 /* ── File Reading ────────────────────────────────────────────────────── */
 
-static char* read_file_w(const WCHAR* fn) {
-    FILE* f=_wfopen(fn,L"rb"); if(!f)return NULL;
+static char* read_file_utf8(const char* fn) {
+    FILE* f=fopen(fn,"rb"); if(!f)return NULL;
     fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
     char* buf=(char*)malloc(sz+1); if(!buf){fclose(f);return NULL;}
     fread(buf,1,sz,f); buf[sz]='\0'; fclose(f);
@@ -1580,45 +1988,7 @@ static HRESULT create_browser(HWND hwnd, IWebBrowser2** ppB, IOleObject** ppO, S
     *ppB=pB; *ppO=pO; return S_OK;
 }
 
-static void navigate_to_html(IWebBrowser2* pB, const char* html, const WCHAR* dir, WCHAR* outTempPath) {
-    outTempPath[0] = 0;
-
-    /* Write HTML to a temp file in the same directory as the .md file.
-       This makes MSHTML load in the Local Machine zone so file:// images work. */
-    WCHAR tempPath[MAX_PATH];
-    wcscpy(tempPath, dir);
-    /* Append a unique temp filename */
-    WCHAR tempName[64];
-    wsprintfW(tempName, L"_mdview_%08x.html", GetTickCount());
-    wcscat(tempPath, tempName);
-
-    /* Write UTF-8 HTML with BOM and Mark of the Web */
-    FILE* tf = _wfopen(tempPath, L"wb");
-    if (tf) {
-        /* UTF-8 BOM */
-        fputc(0xEF, tf); fputc(0xBB, tf); fputc(0xBF, tf);
-        /* Mark of the Web — tells MSHTML to allow script execution in local files */
-        fprintf(tf, "<!-- saved from url=(0016)http://localhost -->\r\n");
-        fwrite(html, 1, strlen(html), tf);
-        fclose(tf);
-        wcscpy(outTempPath, tempPath);
-
-        /* Navigate to the temp file */
-        VARIANT ve; VariantInit(&ve);
-        BSTR url = SysAllocString(tempPath);
-        IWebBrowser2_Navigate(pB, url, &ve, &ve, &ve, &ve);
-        SysFreeString(url);
-
-        /* Wait for load */
-        READYSTATE rs; int to = 200;
-        do { MSG msg; while(PeekMessageW(&msg,NULL,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
-            IWebBrowser2_get_ReadyState(pB,&rs);
-            if(rs!=READYSTATE_COMPLETE) Sleep(10);
-        } while(rs!=READYSTATE_COMPLETE && --to>0);
-        return;
-    }
-
-    /* Fallback: about:blank + document.write (no local image support) */
+static void navigate_to_html(IWebBrowser2* pB, const char* html) {
     VARIANT ve; VariantInit(&ve);
     BSTR url=SysAllocString(L"about:blank");
     IWebBrowser2_Navigate(pB,url,&ve,&ve,&ve,&ve); SysFreeString(url);
@@ -1675,11 +2045,13 @@ static void save_current_settings(IWebBrowser2* pB) {
         WideCharToMultiByte(CP_UTF8, 0, bTitle, -1, title, sizeof(title), NULL, NULL);
         SysFreeString(bTitle);
         int rfs=19, rmw=0, rln=0, rdk=0;
-        sscanf(title, "%d,%d,%d,%d", &rfs, &rmw, &rln, &rdk);
+        sscanf_s(title, "%d,%d,%d,%d", &rfs, &rmw, &rln, &rdk);
         save_setting_int("FontSize", rfs);
         save_setting_int("MaxWidth", rmw);
         save_setting_int("LineNumbers", rln);
         save_setting_int("DarkMode", rdk);
+        save_setting_int("RawFontSize", g_settings.rawFontSize);
+        save_setting_str("RawFontName", g_settings.rawFontName);
     }
 }
 
@@ -1687,7 +2059,9 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
     MDViewData* d=(MDViewData*)GetWindowLongPtrW(hwnd,GWLP_USERDATA);
     switch(msg){
     case WM_SIZE:
-        if (d && d->pBrowser) layout_views(d);
+        if (d && d->pBrowser) {
+            layout_views(d);
+        }
         return 0;
     case WM_SETFOCUS:
         if (d) {
@@ -1703,19 +2077,19 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
                 SetWindowLongPtrW(d->hwndIEServer, GWLP_WNDPROC, (LONG_PTR)d->origIEProc);
                 RemovePropW(d->hwndIEServer, L"MDViewData");
             }
-            /* Clean up split view (contributed by Nigurrath) */
             if (d->hwndText && d->origTextProc) {
                 SetWindowLongPtrW(d->hwndText, GWLP_WNDPROC, (LONG_PTR)d->origTextProc);
                 RemovePropW(d->hwndText, L"MDViewData");
-                DestroyWindow(d->hwndText); d->hwndText = NULL;
+                DestroyWindow(d->hwndText);
+                d->hwndText = NULL;
             }
-            if (d->hTextFont && d->hTextFont != (HFONT)GetStockObject(DEFAULT_GUI_FONT))
+            if (d->hTextFont && d->hTextFont != (HFONT)GetStockObject(DEFAULT_GUI_FONT)) {
                 DeleteObject(d->hTextFont);
+            }
+            d->hTextFont = NULL;
             if (d->mdUtf8) { free(d->mdUtf8); d->mdUtf8 = NULL; }
             if(d->pBrowser) IWebBrowser2_Release(d->pBrowser);
             if(d->pOleObj){ IOleObject_Close(d->pOleObj,OLECLOSE_NOSAVE); IOleObject_Release(d->pOleObj); }
-            /* Clean up temp HTML file */
-            if(d->tempFile[0]) DeleteFileW(d->tempFile);
             free(d); SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);
         }
         return 0;
@@ -1748,7 +2122,7 @@ static void ensure_ie11_emulation(void) {
 
 /* ── TC Lister Plugin Exports ────────────────────────────────────────── */
 
-__declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) {
+__declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
     ensure_ie11_emulation();
     load_settings();
 
@@ -1758,9 +2132,12 @@ __declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) 
         RegisterClassExW(&wc); g_classRegistered=1;
     }
 
-    char* md=read_file_w(file); if(!md)return NULL;
+    char* md=read_file_utf8(file); if(!md)return NULL;
     char* body=md_to_html(md);
-    if(!body){ free(md); return NULL; }
+    if(!body){
+        free(md);
+        return NULL;
+    }
 
     /* Determine theme: saved preference, or auto-detect */
     int dark = (g_settings.isDark >= 0) ? g_settings.isDark : is_dark_theme();
@@ -1770,43 +2147,40 @@ __declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) 
     StrBuf jsBuf;  sb_init(&jsBuf);  build_js(&jsBuf);
     const char* ui = get_ui();
 
-    size_t fl=strlen(body)+cssBuf.len+jsBuf.len+strlen(ui)+2048;
+    size_t fl=strlen(body)+cssBuf.len+jsBuf.len+strlen(ui)+1024;
     char* full=(char*)malloc(fl);
     snprintf(full,fl,
         "<!DOCTYPE html><html%s><head>"
         "<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">"
         "<meta charset=\"utf-8\"><style>%s</style></head><body%s>"
-        "%s%s<div id=\"mdv-ct\">%s</div></body></html>",
-        dark?" style=\"background:#1e1e1e\"":"", cssBuf.data, dark?" class=\"dark\"":"", jsBuf.data, ui, body);
+        "%s<div id=\"mdv-ct\">%s</div>%s</body></html>",
+        dark?" style=\"background:#1e1e1e\"":"", cssBuf.data, dark?" class=\"dark\"":"", ui, body, jsBuf.data);
     free(body); free(cssBuf.data); free(jsBuf.data);
 
     RECT rc; GetClientRect(pw,&rc);
     HWND hwnd=CreateWindowExW(0,CLASS_NAME,L"MDView",
         WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN,0,0,rc.right,rc.bottom,pw,NULL,g_hInstance,NULL);
-    if(!hwnd){free(full);free(md);return NULL;}
+    if(!hwnd){free(full);return NULL;}
 
     OleInitialize(NULL);
     MDViewData* data=(MDViewData*)calloc(1,sizeof(MDViewData));
     data->hwndContainer = hwnd;
-    data->mdUtf8 = md; /* Keep raw markdown for split view (contributed by Nigurrath) */
+    data->mdUtf8 = md;
     SetWindowLongPtrW(hwnd,GWLP_USERDATA,(LONG_PTR)data);
 
     SiteImpl* site=NULL;
     HRESULT hr=create_browser(hwnd,&data->pBrowser,&data->pOleObj,&site);
-    if(FAILED(hr)){free(data->mdUtf8);free(data);free(full);DestroyWindow(hwnd);return NULL;}
+    if(FAILED(hr)){
+        if (data->mdUtf8) free(data->mdUtf8);
+        free(data);
+        free(full);
+        DestroyWindow(hwnd);
+        return NULL;
+    }
 
     layout_views(data);
     IWebBrowser2_put_Silent(data->pBrowser, VARIANT_TRUE);
-
-    /* Extract directory from file path for temp file placement */
-    WCHAR fileDir[MAX_PATH];
-    wcsncpy(fileDir, file, MAX_PATH); fileDir[MAX_PATH-1]=0;
-    WCHAR* lastSep = wcsrchr(fileDir, L'\\');
-    if (!lastSep) lastSep = wcsrchr(fileDir, L'/');
-    if (lastSep) lastSep[1] = 0; else { fileDir[0]=L'.'; fileDir[1]=L'\\'; fileDir[2]=0; }
-
-    navigate_to_html(data->pBrowser, full, fileDir, data->tempFile);
-    free(full);
+    navigate_to_html(data->pBrowser,full); free(full);
 
     IOleObject_DoVerb(data->pOleObj, OLEIVERB_UIACTIVATE, NULL,
                       (IOleClientSite*)&site->clientSite, 0, hwnd, &rc);
@@ -1826,59 +2200,83 @@ __declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) 
     return hwnd;
 }
 
-__declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
-    /* Convert ANSI path to wide and delegate to ListLoadW */
-    int len=MultiByteToWideChar(CP_ACP,0,file,-1,NULL,0);
-    WCHAR* w=(WCHAR*)malloc(len*sizeof(WCHAR));
-    MultiByteToWideChar(CP_ACP,0,file,-1,w,len);
-    HWND r=ListLoadW(pw,w,flags); free(w); return r;
+__declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) {
+    int len=WideCharToMultiByte(CP_UTF8,0,file,-1,NULL,0,NULL,NULL);
+    char* u=(char*)malloc(len); WideCharToMultiByte(CP_UTF8,0,file,-1,u,len,NULL,NULL);
+    HWND r=ListLoad(pw,u,flags); free(u); return r;
 }
 
 __declspec(dllexport) void __stdcall ListCloseWindow(HWND w) { DestroyWindow(w); }
 
 __declspec(dllexport) void __stdcall ListGetDetectString(char* ds, int mx) {
-    strncpy(ds,"EXT=\"MD\" | EXT=\"MARKDOWN\" | EXT=\"MKD\" | EXT=\"MKDN\"",mx-1); ds[mx-1]='\0';
+    strncpy_s(ds, (size_t)mx, "EXT=\"MD\" | EXT=\"MARKDOWN\" | EXT=\"MKD\" | EXT=\"MKDN\"", _TRUNCATE);
 }
 
-__declspec(dllexport) int __stdcall ListSearchText(HWND w, int p, char* s) {
-    /* TC Lister search: p&1=find first, p&2=find next, p&4=backwards */
-    if (!s || !s[0]) return LISTPLUGIN_ERROR;
+/*
+   Total Commander calls this for Ctrl+F and F3/Shift+F3 text search.
+   If we return LISTPLUGIN_ERROR here, TC shows "Not found" immediately.
+   We map TC's search calls to the internal JS highlighter-based search.
+*/
+__declspec(dllexport) int __stdcall ListSearchText(HWND w, char* searchString, int searchParameter) {
     MDViewData* d = (MDViewData*)GetWindowLongPtrW(w, GWLP_USERDATA);
     if (!d || !d->pBrowser) return LISTPLUGIN_ERROR;
 
-    /* Use our JS find infrastructure: on first search populate, then navigate */
-    int wl = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    wchar_t* ws = (wchar_t*)malloc(wl * sizeof(wchar_t));
-    MultiByteToWideChar(CP_UTF8, 0, s, -1, ws, wl);
-
-    /* Escape single quotes in search term */
-    wchar_t escaped[512]; int ei = 0;
-    for (int i = 0; ws[i] && ei < 500; i++) {
-        if (ws[i] == L'\'') { escaped[ei++] = L'\\'; escaped[ei++] = L'\''; }
-        else if (ws[i] == L'\\') { escaped[ei++] = L'\\'; escaped[ei++] = L'\\'; }
-        else escaped[ei++] = ws[i];
-    }
-    escaped[ei] = 0;
-    free(ws);
-
-    wchar_t js[1024];
-    if (p & 1) {
-        /* First search: populate matches */
-        swprintf(js, 1024, L"df('%ls')", escaped);
-        exec_js(d->pBrowser, js);
-    } else {
-        /* Next/prev */
-        if (p & 4) exec_js(d->pBrowser, L"fp()");
-        else exec_js(d->pBrowser, L"fn()");
+    /* Convert ANSI (system codepage) to UTF-16 */
+    wchar_t* ws = NULL;
+    if (searchString && searchString[0]) {
+        int wl = MultiByteToWideChar(CP_ACP, 0, searchString, -1, NULL, 0);
+        if (wl > 0) {
+            ws = (wchar_t*)calloc((size_t)wl, sizeof(wchar_t));
+            if (ws) MultiByteToWideChar(CP_ACP, 0, searchString, -1, ws, wl);
+        }
     }
 
+    int findFirst  = (searchParameter & LCS_FINDFIRST) ? 1 : 0;
+    int matchCase  = (searchParameter & LCS_MATCHCASE) ? 1 : 0;
+    int wholeWords = (searchParameter & LCS_WHOLEWORDS) ? 1 : 0;
+    int backwards  = (searchParameter & LCS_BACKWARDS) ? 1 : 0;
+
+    /* If a string is provided, apply the search. For "find next", TC may pass NULL. */
+    if (ws && ws[0]) {
+        /* Always re-apply on find-first, otherwise apply once then step */
+        js_find_apply(d, ws, matchCase, wholeWords);
+        if (!findFirst) {
+            js_find_step(d, backwards);
+        }
+        free(ws);
+        return LISTPLUGIN_OK;
+    }
+
+    /* No string: treat as "find next/prev" */
+    js_find_step(d, backwards);
+    if (ws) free(ws);
+    return LISTPLUGIN_OK;
+}
+
+__declspec(dllexport) int __stdcall ListSearchTextW(HWND w, WCHAR* searchString, int searchParameter) {
+    MDViewData* d = (MDViewData*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    if (!d || !d->pBrowser) return LISTPLUGIN_ERROR;
+
+    int findFirst  = (searchParameter & LCS_FINDFIRST) ? 1 : 0;
+    int matchCase  = (searchParameter & LCS_MATCHCASE) ? 1 : 0;
+    int wholeWords = (searchParameter & LCS_WHOLEWORDS) ? 1 : 0;
+    int backwards  = (searchParameter & LCS_BACKWARDS) ? 1 : 0;
+
+    if (searchString && searchString[0]) {
+        js_find_apply(d, searchString, matchCase, wholeWords);
+        if (!findFirst) {
+            js_find_step(d, backwards);
+        }
+        return LISTPLUGIN_OK;
+    }
+
+    js_find_step(d, backwards);
     return LISTPLUGIN_OK;
 }
 __declspec(dllexport) int __stdcall ListSendCommand(HWND w, int c, int p) { return LISTPLUGIN_OK; }
 
 __declspec(dllexport) void __stdcall ListSetDefaultParams(ListDefaultParamStruct* p) {
     if (p && p->DefaultIniName[0]) {
-        strncpy(g_iniPath, p->DefaultIniName, MAX_PATH - 1);
-        g_iniPath[MAX_PATH - 1] = '\0';
+        strncpy_s(g_iniPath, MAX_PATH, p->DefaultIniName, _TRUNCATE);
     }
 }
