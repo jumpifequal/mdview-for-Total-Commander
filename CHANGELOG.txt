@@ -48,6 +48,8 @@ v 2.6
 - change: Mermaid rendering is intentionally disabled on the XP build and falls back to the original source block for stability
 
 v 2.7
-- fix: helper functions to avoid malicious urls inside an md to trigger
-- fix: controlled realloc and cap to lenght limits, to avoid system crash with too long md files
+v 2.7
+- fix: helper functions to avoid malicious URLs inside an MD to trigger
+- fix: controlled realloc and cap to length limits, to avoid system crash with too long md files
 - add: added mouse tooltip on links
+- add: confirmed running on WinXP SP3 (with Microsoft v141_xp libraries distribution) - see https://learn.microsoft.com/en-us/cpp/build/configuring-programs-for-windows-xp?view=msvc-170
