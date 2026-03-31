@@ -8,9 +8,15 @@ Press `F3` on any `.md` file and get a clean, fully rendered preview with dark m
 
 ---
 
-## Screenshots
+## WinXP compatibility limitations
 
-> *TODO: Add screenshots of light mode, dark mode, split view, and Mermaid rendering.*
+* WinXP uses v141_xp
+
+* Compatible with **XP SP3**
+
+* Mermaid is not supported: because the MSHTML component on Windows XP does not support SVG. Internet Explorer <= 8
+
+* Win XP build supports only Total Commander 32bit 
 
 ## Features
 
@@ -51,28 +57,33 @@ For the supported diagram types, MDView keeps Mermaid output aligned with the su
 
 Unsupported Mermaid syntaxes fall back safely to the original source block instead of breaking the preview.
 
+For the dedicated Windows XP build, Mermaid blocks fall back to the original source block instead of rendered diagrams. This keeps the XP target stable while preserving full Mermaid rendering on the modern Win32 and x64 builds.
+
 ## Keyboard Shortcuts
 
-| Shortcut           | Action                                                     |
-| ------------------ | ---------------------------------------------------------- |
-| `Ctrl` `+`         | Zoom in                                                    |
-| `Ctrl` `-`         | Zoom out                                                   |
-| `Ctrl` `0`         | Reset zoom                                                 |
-| `Ctrl` `W`         | Constrain column width                                     |
-| `Ctrl` `Shift` `W` | Widen or remove column constraint                          |
-| `Ctrl` `D`         | Toggle dark / light mode                                   |
-| `Ctrl` `L`         | Toggle line numbers                                        |
-| `Ctrl` `T`         | Table of Contents                                          |
-| `Ctrl` `F`         | Find in page                                               |
-| `Ctrl` `P`         | Print                                                      |
-| `Ctrl` `G`         | Go to top                                                  |
-| `Ctrl` `M`         | Toggle split view                                          |
-| `Ctrl` `C`         | Copy selection                                             |
-| `Ctrl` `A`         | Select All text in one of the window (md render or source) |
-| `Esc`              | Close viewer                                               |
-| `F1`               | Show shortcut reference                                    |
+| Shortcut           | Action                            |
+| ------------------ | --------------------------------- |
+| `Ctrl` `+`         | Zoom in                           |
+| `Ctrl` `-`         | Zoom out                          |
+| `Ctrl` `0`         | Reset zoom                        |
+| `Ctrl` `W`         | Constrain column width            |
+| `Ctrl` `Shift` `W` | Widen or remove column constraint |
+| `Ctrl` `D`         | Toggle dark / light mode          |
+| `Ctrl` `L`         | Toggle line numbers               |
+| `Ctrl` `T`         | Table of Contents                 |
+| `Ctrl` `F`         | Find in page                      |
+| `Ctrl` `P`         | Print                             |
+| `Ctrl` `G`         | Go to top                         |
+| `Ctrl` `M`         | Toggle split view                 |
+| `Ctrl` `C`         | Copy selection                    |
+| `Esc`              | Close viewer                      |
+| `F1`               | Show shortcut reference           |
 
 Press `F1` inside the viewer for an on-screen reference.
+
+## Download
+
+Grab the latest release from the [Releases](../../releases) page. The archive contains both 32-bit and 64-bit builds.
 
 ## Installation
 
@@ -100,6 +111,14 @@ For Mermaid validation, use `test_mermaid.md`. It covers the Mermaid diagram fam
 The plugin is implemented in a single C source file and can be built natively on Windows with MSVC.
 
 The raw Markdown view uses the built-in **RichEdit (Msftedit.dll)** control available on modern Windows systems.
+
+Visual Studio configurations:
+
+- `Release|Win32` - modern 32-bit build (`mdview.wlx`)
+- `Release|x64` - modern 64-bit build (`mdview.wlx64`)
+- `ReleaseXP|Win32` - Windows XP-compatible 32-bit build (`mdview_xp.wlx`)
+
+The `ReleaseXP|Win32` configuration targets `_WIN32_WINNT=0x0501` with the XP toolset and keeps the XP-specific fallbacks isolated in local compatibility helpers.
 
 ## How It Works
 

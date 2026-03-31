@@ -19,7 +19,7 @@ v 2.3
 - add: source code ready to be compiled under WinXP
 - add: font and dimension of split view (ctrl-m) is now in ini file
 - add: ctrl-A to select all (do it like ctrl-c in the window with the focus)
-- add: ESC in split view exit from lister
+- add: ESC in split view esc from lister
 
 v 2.4
 - add: built-in Mermaid rendering for flowchart/graph diagrams
@@ -28,7 +28,9 @@ v 2.4
 - add: built-in Mermaid rendering for stateDiagram-v2 diagrams
 - add: Mermaid diagrams are rendered self-contained inside the WLX/WLX64 binaries
 - add: Mermaid diagram typography follows the active viewer font size and font family
-- add: test_mermaid.md and test_mermaid_stress.md contain two dedicated samples set for all Mermaid diagram types currently supported
+- add: test_mermaid.md contains a dedicated sample set for all Mermaid diagram types currently supported
+
+v 2.5
 - fix: Mermaid SVG sizing now stays visually consistent with the surrounding Markdown layout
 - fix: Mermaid typography is now applied centrally so supported diagram types use the active viewer font size and font family more consistently
 - fix: sequenceDiagram parsing now handles arrow operators such as -->> correctly without creating malformed participant names
@@ -36,4 +38,11 @@ v 2.4
 - fix: classDiagram relation parsing now recognises operators containing >
 - fix: classDiagram routing avoids passing inter-row relations through class boxes and reduces label collisions in dense layouts
 - fix: stateDiagram parsing now handles pseudo-states correctly and renders simple vertical flows with direct state-to-state arrows
-- add: WLXharness now supports commandline to test during development (WLXHarness <pathto wlx|wlx64> <path to md file>)
+
+v 2.6
+- add: dedicated Visual Studio configuration ReleaseXP|Win32 for an XP-compatible 32-bit build
+- add: XP-specific compatibility wrappers and fallbacks isolated behind _WIN32_WINNT
+- add: XP build now uses an XP-capable toolset and static CRT linkage to avoid modern runtime dependencies
+- fix: raw Markdown default font now falls back to Courier New on XP while keeping Cascadia Mono on modern Windows
+- fix: dark theme auto-detection is disabled on XP and remains unchanged on modern Windows
+- change: Mermaid rendering is intentionally disabled on the XP build and falls back to the original source block for stability

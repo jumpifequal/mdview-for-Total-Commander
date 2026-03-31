@@ -32,9 +32,20 @@
 #endif _UNICODE
 
 #define WIN32_LEAN_AND_MEAN
-#define _WIN32_WINNT 0x0501
+#ifndef _WIN32_WINNT
+    #define _WIN32_WINNT 0x0A00
+#endif
+#ifndef WINVER
+    #define WINVER _WIN32_WINNT
+#endif
 
-#define MDVIEW_RAW_FONT_NAME L"Cascadia Mono"
+#if _WIN32_WINNT < 0x0600
+    #define MDVIEW_RAW_FONT_NAME_A "Courier New"
+    #define MDVIEW_RAW_FONT_NAME L"Courier New"
+#else
+    #define MDVIEW_RAW_FONT_NAME_A "Cascadia Mono"
+    #define MDVIEW_RAW_FONT_NAME L"Cascadia Mono"
+#endif
 #define MDVIEW_RAW_FONT_PT   11
 
 #include <windows.h>
@@ -68,6 +79,8 @@ static char* read_file_utf8(const char*);
 static char* md_to_html(const char*);
 static int   is_dark_theme(void);
 static void  navigate_to_html(IWebBrowser2*, const char*);
+static LONG_PTR mdview_set_window_ptr(HWND, int, LONG_PTR);
+static LONG_PTR mdview_get_window_ptr(HWND, int);
 
 static const wchar_t CLASS_NAME[] = L"MDViewWLXContainer";
 static HINSTANCE g_hInstance = NULL;
@@ -110,7 +123,7 @@ static void load_settings(void) {
     g_settings.lineNums = GetPrivateProfileIntA("MDView", "LineNumbers", 0, g_iniPath);
     g_settings.rawFontSize = GetPrivateProfileIntA("MDView", "RawFontSize", MDVIEW_RAW_FONT_PT, g_iniPath);
     char fontNameA[64];
-    GetPrivateProfileStringA("MDView", "RawFontName", "Cascadia Mono", fontNameA, sizeof(fontNameA), g_iniPath);
+    GetPrivateProfileStringA("MDView", "RawFontName", MDVIEW_RAW_FONT_NAME_A, fontNameA, sizeof(fontNameA), g_iniPath);
     MultiByteToWideChar(CP_ACP, 0, fontNameA, -1, g_settings.rawFontName, 64);
 
     /* Clamp */
@@ -132,6 +145,28 @@ static void save_setting_str(const char* key, const wchar_t* val) {
     char buf[64];
     WideCharToMultiByte(CP_ACP, 0, val, -1, buf, sizeof(buf), NULL, NULL);
     WritePrivateProfileStringA("MDView", key, buf, g_iniPath);
+}
+
+//Wrapper for SetWindowLongPtr / SetWindowLong to avoid warnings and support both 32-bit and 64-bit Windows with the same code.
+static LONG_PTR mdview_set_window_ptr(HWND hwnd, int index, LONG_PTR value) {
+#if defined(_WIN64)
+    return SetWindowLongPtrW(hwnd, index, value);
+#elif _WIN32_WINNT < 0x0600
+    return (LONG_PTR)SetWindowLongW(hwnd, index, (LONG)value);
+#else
+    return SetWindowLongPtrW(hwnd, index, value);
+#endif
+}
+
+//Wrapper for GetWindowLongPtr / GetWindowLong to avoid warnings and support both 32-bit and 64-bit Windows with the same code.
+static LONG_PTR mdview_get_window_ptr(HWND hwnd, int index) {
+#if defined(_WIN64)
+    return GetWindowLongPtrW(hwnd, index);
+#elif _WIN32_WINNT < 0x0600
+    return (LONG_PTR)GetWindowLongW(hwnd, index);
+#else
+    return GetWindowLongPtrW(hwnd, index);
+#endif
 }
 
 /* Execute JavaScript on the browser document */
@@ -521,7 +556,7 @@ static void toggle_split_view(MDViewData* d) {
             if (hEdit) {
                 d->hwndText = hEdit;
                 SetPropW(hEdit, L"MDViewData", (HANDLE)d);
-                d->origTextProc = (WNDPROC)SetWindowLongPtrW(hEdit, GWLP_WNDPROC, (LONG_PTR)TextViewSubclassProc);
+                d->origTextProc = (WNDPROC)mdview_set_window_ptr(hEdit, GWLP_WNDPROC, (LONG_PTR)TextViewSubclassProc);
 
                 /* Monospace font for raw Markdown */
                 if (!d->hTextFont || d->hTextFont == (HFONT)GetStockObject(DEFAULT_GUI_FONT)) {
@@ -1186,10 +1221,14 @@ static char* md_to_html(const char* markdown) {
 /* ── Theme Detection ─────────────────────────────────────────────────── */
 
 static int is_dark_theme(void) {
+#if _WIN32_WINNT >= 0x0600
     HKEY hKey; DWORD val=1, sz=sizeof(DWORD);
     if(RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey)==ERROR_SUCCESS){
         RegQueryValueExW(hKey,L"AppsUseLightTheme",NULL,NULL,(LPBYTE)&val,&sz); RegCloseKey(hKey); return val==0;
     } return 0;
+#else
+    return 0;
+#endif
 }
 
 /* ── CSS ─────────────────────────────────────────────────────────────── */
@@ -1472,13 +1511,18 @@ static void build_js(StrBuf* sb) {
 
     /* Find */
     "var fm=[],fi=-1;"
+    "function mdvTextWalker(root){var nodes=[],stack=[root],n,i,ch;"
+    "while(stack.length){n=stack.pop();if(!n)continue;"
+    "if(n.nodeType===3){nodes.push(n);continue;}"
+    "ch=n.childNodes;if(!ch)continue;for(i=ch.length-1;i>=0;i--)stack.push(ch[i]);}"
+    "return{_nodes:nodes,_idx:-1,currentNode:null,nextNode:function(){this._idx++;if(this._idx>=this._nodes.length)return false;this.currentNode=this._nodes[this._idx];return true;}}}"
     "function cf(){var ms=document.querySelectorAll('.hl');for(var i=0;i<ms.length;i++){"
     "var m=ms[i],p=m.parentNode;p.replaceChild(document.createTextNode(m.innerText),m);p.normalize()}"
     "fm=[];fi=-1;document.getElementById('mdv-fc').innerText=''}"
 
     "function df(txt,mc,ww){cf();if(!txt)return;mc=mc?1:0;ww=ww?1:0;"
     "var ct=document.getElementById('mdv-ct');if(!ct)return;"
-    "var w=document.createTreeWalker(ct,4,null,false),ns=[];"
+    "var w=document.createTreeWalker?document.createTreeWalker(ct,4,null,false):mdvTextWalker(ct),ns=[];"
     "var re=null;"
     "if(ww){"
     "  var esc=txt.replace(/[\\^$.*+?()[\\]{}|]/g,'\\\\$&');"
@@ -1821,6 +1865,11 @@ static void build_js(StrBuf* sb) {
     "else if(ctx.kind==='state')ok=mmRenderState(view,ctx);"
     "if(ok){block.className+=(block.className?' ':'')+'ok';syncMermaidTypography();if(window.setTimeout)window.setTimeout(syncMermaidTypography,0);}}"
     "function initMermaid(){var blocks=document.querySelectorAll('.mdv-mermaid[data-mdv-mermaid]');for(var i=0;i<blocks.length;i++)mmRender(blocks[i])}"
+#if _WIN32_WINNT < 0x0600
+    "function fitMermaidSvg(svg){return;}"
+    "function syncMermaidTypography(){return;}"
+    "function initMermaid(){return;}"
+#endif
     "function pd(e){if(e.preventDefault)e.preventDefault();else e.returnValue=false}"
     "document.onkeydown=function(e){"
     "e=e||window.event;var c=e.ctrlKey||e.metaKey,k=e.keyCode;"
@@ -2056,7 +2105,7 @@ static void save_current_settings(IWebBrowser2* pB) {
 }
 
 static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM lP) {
-    MDViewData* d=(MDViewData*)GetWindowLongPtrW(hwnd,GWLP_USERDATA);
+    MDViewData* d=(MDViewData*)mdview_get_window_ptr(hwnd, GWLP_USERDATA);
     switch(msg){
     case WM_SIZE:
         if (d && d->pBrowser) {
@@ -2074,11 +2123,11 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
             /* Save settings to INI before closing */
             save_current_settings(d->pBrowser);
             if(d->hwndIEServer && d->origIEProc){
-                SetWindowLongPtrW(d->hwndIEServer, GWLP_WNDPROC, (LONG_PTR)d->origIEProc);
+        mdview_set_window_ptr(d->hwndIEServer, GWLP_WNDPROC, (LONG_PTR)d->origIEProc);
                 RemovePropW(d->hwndIEServer, L"MDViewData");
             }
             if (d->hwndText && d->origTextProc) {
-                SetWindowLongPtrW(d->hwndText, GWLP_WNDPROC, (LONG_PTR)d->origTextProc);
+        mdview_set_window_ptr(d->hwndText, GWLP_WNDPROC, (LONG_PTR)d->origTextProc);
                 RemovePropW(d->hwndText, L"MDViewData");
                 DestroyWindow(d->hwndText);
                 d->hwndText = NULL;
@@ -2090,7 +2139,7 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
             if (d->mdUtf8) { free(d->mdUtf8); d->mdUtf8 = NULL; }
             if(d->pBrowser) IWebBrowser2_Release(d->pBrowser);
             if(d->pOleObj){ IOleObject_Close(d->pOleObj,OLECLOSE_NOSAVE); IOleObject_Release(d->pOleObj); }
-            free(d); SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);
+    free(d); mdview_set_window_ptr(hwnd, GWLP_USERDATA, 0);
         }
         return 0;
     }
@@ -2166,7 +2215,7 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
     MDViewData* data=(MDViewData*)calloc(1,sizeof(MDViewData));
     data->hwndContainer = hwnd;
     data->mdUtf8 = md;
-    SetWindowLongPtrW(hwnd,GWLP_USERDATA,(LONG_PTR)data);
+    mdview_set_window_ptr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
 
     SiteImpl* site=NULL;
     HRESULT hr=create_browser(hwnd,&data->pBrowser,&data->pOleObj,&site);
@@ -2192,7 +2241,7 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
         if (ieWnd) {
             data->hwndIEServer = ieWnd;
             SetPropW(ieWnd, L"MDViewData", (HANDLE)data);
-            data->origIEProc = (WNDPROC)SetWindowLongPtrW(ieWnd, GWLP_WNDPROC, (LONG_PTR)IEServerSubclassProc);
+            data->origIEProc = (WNDPROC)mdview_set_window_ptr(ieWnd, GWLP_WNDPROC, (LONG_PTR)IEServerSubclassProc);
             SetFocus(ieWnd);
         }
     }
@@ -2218,7 +2267,7 @@ __declspec(dllexport) void __stdcall ListGetDetectString(char* ds, int mx) {
    We map TC's search calls to the internal JS highlighter-based search.
 */
 __declspec(dllexport) int __stdcall ListSearchText(HWND w, char* searchString, int searchParameter) {
-    MDViewData* d = (MDViewData*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    MDViewData* d = (MDViewData*)mdview_get_window_ptr(w, GWLP_USERDATA);
     if (!d || !d->pBrowser) return LISTPLUGIN_ERROR;
 
     /* Convert ANSI (system codepage) to UTF-16 */
@@ -2254,7 +2303,7 @@ __declspec(dllexport) int __stdcall ListSearchText(HWND w, char* searchString, i
 }
 
 __declspec(dllexport) int __stdcall ListSearchTextW(HWND w, WCHAR* searchString, int searchParameter) {
-    MDViewData* d = (MDViewData*)GetWindowLongPtrW(w, GWLP_USERDATA);
+    MDViewData* d = (MDViewData*)mdview_get_window_ptr(w, GWLP_USERDATA);
     if (!d || !d->pBrowser) return LISTPLUGIN_ERROR;
 
     int findFirst  = (searchParameter & LCS_FINDFIRST) ? 1 : 0;
