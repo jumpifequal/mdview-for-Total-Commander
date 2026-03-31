@@ -39,7 +39,7 @@ v 2.5
 - fix: classDiagram routing avoids passing inter-row relations through class boxes and reduces label collisions in dense layouts
 - fix: stateDiagram parsing now handles pseudo-states correctly and renders simple vertical flows with direct state-to-state arrows
 
-v 2.6
+v 2.6 (skipped)
 - add: dedicated Visual Studio configuration ReleaseXP|Win32 for an XP-compatible 32-bit build
 - add: XP-specific compatibility wrappers and fallbacks isolated behind _WIN32_WINNT
 - add: XP build now uses an XP-capable toolset and static CRT linkage to avoid modern runtime dependencies
@@ -48,8 +48,7 @@ v 2.6
 - change: Mermaid rendering is intentionally disabled on the XP build and falls back to the original source block for stability
 
 v 2.7
-v 2.7
 - fix: helper functions to avoid malicious URLs inside an MD to trigger
 - fix: controlled realloc and cap to length limits, to avoid system crash with too long md files
 - add: added mouse tooltip on links
-- add: confirmed running on WinXP SP3 (with Microsoft v141_xp libraries distribution) - see https://learn.microsoft.com/en-us/cpp/build/configuring-programs-for-windows-xp?view=msvc-170
+- add: confirmed running on WinXP SP3 (with Microsoft v141_xp libraries distribution) - see https://learn.microsoft.com/en-us/cpp/build/configuring-programs-for-windows-xp
