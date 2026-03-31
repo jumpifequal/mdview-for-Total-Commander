@@ -29,6 +29,7 @@ Press `F3` on any `.md` file and get a clean, fully rendered preview with dark m
 - **Line numbers** — toggle on code blocks with `Ctrl+L`
 - **Table of Contents** — auto-generated sidebar from headings
 - **Find in page** — incremental search with match highlighting and navigation
+- **Tooltip on links** — on mouse over, the plugin shows the real link to avoid malicious links (e.g. in promptware skills)
 - **Split view** — rendered Markdown alongside the raw Markdown source with `Ctrl+M`
 - **Raw Markdown viewer** — implemented with the Windows RichEdit control using a configurable monospace font
 - **Scroll synchronisation** — rendered HTML and raw Markdown views stay aligned using ratio-based document scrolling
