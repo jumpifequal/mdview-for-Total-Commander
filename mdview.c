@@ -1,5 +1,5 @@
 /*
- * MDView v2.1 - Total Commander Lister Plugin for Markdown
+ * MDView v3.0 - Total Commander Lister Plugin for Markdown
  * =========================================================
  * Lightweight WLX plugin: built-in Markdown->HTML, embedded MSHTML, zero deps.
  *
@@ -61,7 +61,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include "resource.h"
 
 /* ── TC Lister Plugin Interface ──────────────────────────────────────── */
 
@@ -94,10 +93,12 @@ typedef struct {
     WNDPROC       origIEProc;    /* Original wndproc of IE Server */
     HWND          hwndContainer; /* Our container window */
     HWND          hwndText;      /* Raw text view (RichEdit), optional */
+    HWND          hwndTextCount; /* Raw char count label */
     WNDPROC       origTextProc;  /* Subclass of raw text control */
     HFONT         hTextFont;     /* Font for raw text view */
     int           splitView;     /* 0/1 */
     int           syncGuard;     /* recursion guard for scroll sync */
+    size_t        rawCharCount;  /* UTF-8 codepoint count for raw markdown */
     char*         mdUtf8;        /* raw markdown (UTF-8), owned */
 } MDViewData;
 
@@ -289,6 +290,24 @@ static wchar_t* utf8_to_wide_dup(const char* s) {
     return w;
 }
 
+static size_t utf8_char_count(const char* s) {
+    size_t count = 0;
+    const unsigned char* p = (const unsigned char*)s;
+    if (!p) return 0;
+    while (*p) {
+        if ((*p & 0xC0) != 0x80 && *p != '\r' && *p != '\n') ++count;
+        ++p;
+    }
+    return count;
+}
+
+static void set_raw_count_label(HWND hwnd, size_t count) {
+    if (!hwnd) return;
+    wchar_t text[64];
+    _snwprintf_s(text, _countof(text), _TRUNCATE, L"RAW chars: %llu", (unsigned long long)count);
+    SetWindowTextW(hwnd, text);
+}
+
 static int get_document_title_utf8(IWebBrowser2* pB, char* out, int outsz) {
     if (!pB || !out || outsz <= 0) return 0;
     out[0] = '\0';
@@ -425,9 +444,13 @@ static void layout_views(MDViewData* d) {
     RECT rc; GetClientRect(d->hwndContainer, &rc);
     int w = rc.right;
     int h = rc.bottom;
+    const int rawHeaderH = 28;
+    const int rawPad = 8;
 
     int leftW = w;
     int rightW = 0;
+    int rawTextH = h - rawHeaderH;
+    if (rawTextH < 0) rawTextH = 0;
 
     if (d->splitView && d->hwndText) {
         leftW = w / 2;
@@ -453,10 +476,17 @@ static void layout_views(MDViewData* d) {
 
     HWND child = GetWindow(d->hwndContainer, GW_CHILD);
     while (child) {
-        if (child == d->hwndText) {
+        if (child == d->hwndTextCount) {
+            if (d->splitView && d->hwndText) {
+                ShowWindow(child, SW_SHOW);
+                MoveWindow(child, leftW + rawPad, rawPad / 2, rightW - (rawPad * 2), rawHeaderH - rawPad, TRUE);
+            } else {
+                ShowWindow(child, SW_HIDE);
+            }
+        } else if (child == d->hwndText) {
             if (d->splitView) {
                 ShowWindow(child, SW_SHOW);
-                MoveWindow(child, leftW, 0, rightW, h, TRUE);
+                MoveWindow(child, leftW, rawHeaderH, rightW, rawTextH, TRUE);
             } else {
                 ShowWindow(child, SW_HIDE);
             }
@@ -556,6 +586,16 @@ static void toggle_split_view(MDViewData* d) {
                 d->hwndText = hEdit;
                 SetPropW(hEdit, L"MDViewData", (HANDLE)d);
                 d->origTextProc = (WNDPROC)mdview_set_window_ptr(hEdit, GWLP_WNDPROC, (LONG_PTR)TextViewSubclassProc);
+
+                d->hwndTextCount = CreateWindowExW(
+                    0, L"STATIC", L"",
+                    WS_CHILD | SS_RIGHT,
+                    0, 0, 0, 0,
+                    d->hwndContainer, NULL, g_hInstance, NULL);
+                if (d->hwndTextCount) {
+                    SendMessageW(d->hwndTextCount, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+                    set_raw_count_label(d->hwndTextCount, d->rawCharCount);
+                }
 
                 /* Monospace font for raw Markdown */
                 if (!d->hTextFont || d->hTextFont == (HFONT)GetStockObject(DEFAULT_GUI_FONT)) {
@@ -1473,6 +1513,13 @@ static void build_css(StrBuf* sb) {
     "background:#0366d6;width:0;transition:width .1s}"
     "body.dark #mdv-prog{background:#569cd6}"
 
+    /* Char count */
+    "#mdv-char{position:fixed;right:16px;bottom:16px;z-index:10002;"
+    "padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.92);"
+    "border:1px solid #d0d7de;color:#57606a;font:12px 'Segoe UI',sans-serif;"
+    "box-shadow:0 3px 12px rgba(0,0,0,.10);pointer-events:none}"
+    "body.dark #mdv-char{background:rgba(37,37,38,.94);border-color:#444;color:#c9d1d9}"
+
     /* Help overlay */
     "#mdv-help{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);"
     "background:#ffffff;border:1px solid #ccc;border-radius:12px;"
@@ -1515,6 +1562,21 @@ static void build_js(StrBuf* sb) {
     /* Toast */
     "function toast(m){var t=document.getElementById('mdv-toast');t.innerText=m;t.className='on';"
     "if(tt)clearTimeout(tt);tt=setTimeout(function(){t.className=''},1500)}"
+
+    /* Char count */
+    "function rcc(){var ct=document.getElementById('mdv-ct'),out=[],walker,n,pv;"
+    "if(!ct)return 0;"
+    "walker=document.createTreeWalker?document.createTreeWalker(ct,4,null,false):mdvTextWalker(ct);"
+    "function inPre(node){while(node&&node!==ct){var nm=node.nodeName;if(nm==='PRE'||nm==='CODE'||nm==='TEXTAREA')return true;node=node.parentNode;}return false;}"
+    "function isHidden(node){while(node&&node!==ct){if(node.nodeType===1&&node.currentStyle&&node.currentStyle.display==='none')return true;node=node.parentNode;}return false;}"
+    "while(walker.nextNode()){n=walker.currentNode;if(!n||!n.nodeValue||isHidden(n.parentNode))continue;"
+    "if(inPre(n.parentNode)){out.push(n.nodeValue.replace(/\\r|\\n/g,''));pv=n.nodeValue.slice(-1);continue;}"
+    "var t=n.nodeValue.replace(/\\u00a0/g,' ').replace(/\\s+/g,' ');"
+    "if(!t)continue;"
+    "if(pv===' '&&t.charAt(0)===' ')t=t.substring(1);"
+    "out.push(t);pv=t.slice(-1);}"
+    "return out.join('').replace(/\\r|\\n/g,'').replace(/^\\s+|\\s+$/g,'').length;}"
+    "function ucc(){var el=document.getElementById('mdv-char');if(el)el.innerText='MD chars: '+rcc();}"
 
     /* Zoom */
     "function zi(){fs=Math.min(fs+1,30);af()}"
@@ -1993,6 +2055,7 @@ static void build_js(StrBuf* sb) {
     "}"
     "initMermaid();shAll();initCollapse();initLinkTooltips();"
     "if(ln)tl();"  /* apply line numbers if saved */
+    "ucc();"
     "up()};"
     "</script>");
 }
@@ -2009,6 +2072,7 @@ static const char* get_ui(void) {
     "<button class=\"fb\" onclick=\"fn()\">&raquo;</button>"
     "<button class=\"fb\" onclick=\"hf()\">&times;</button>"
     "</div>"
+    "<div id=\"mdv-char\"></div>"
     "<div id=\"mdv-toc\"><div id=\"mdv-toc-t\">Table of Contents</div></div>"
     "<div id=\"mdv-toast\"></div>"
     "<div id=\"mdv-help\">"
@@ -2044,7 +2108,7 @@ static const char* get_ui(void) {
     "<div class=\"hrow\"><span>This help</span><span class=\"hkeys\"><span class=\"kc\">F1</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
-    "<div class=\"help-foot\">MDView v2.2 &middot; Settings auto-saved &middot; Press Esc to close</div>"
+    "<div class=\"help-foot\">MDView v3.0 &middot; Settings auto-saved &middot; Press Esc to close</div>"
     "</div>";
 }
 
@@ -2325,6 +2389,7 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
         return NULL;
     }
     data->hwndContainer = hwnd;
+    data->rawCharCount = utf8_char_count(md);
     data->mdUtf8 = md;
     mdview_set_window_ptr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
 

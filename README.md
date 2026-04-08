@@ -35,6 +35,7 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Tooltip on links** — hovering a link shows the resolved target URL
 - **Split view** — rendered Markdown alongside the raw Markdown source with `Ctrl+M`
 - **Raw Markdown viewer** — implemented with the Windows RichEdit control using a configurable monospace font
+- **Character count with spaces** — both rendered and raw views show a character count aligned to a Word-like convention that excludes line breaks
 - **Scroll synchronisation** — rendered HTML and raw Markdown views stay aligned using ratio-based document scrolling
 - **Smart clipboard behaviour**
   - Copy from rendered view → formatted HTML + plain text
@@ -87,7 +88,7 @@ Press `F1` inside the viewer for an on-screen reference.
 
 ## Download
 
-Grab the latest release from the [Releases](../../releases) page. The archive contains both 32-bit and 64-bit builds.
+Grab the latest release from the [Releases](../../releases) page. The distribution includes modern Win32 (`mdview.wlx`), x64 (`mdview.wlx64`), and Windows XP (`mdview_xp.wlx`) builds.
 
 ## Installation
 

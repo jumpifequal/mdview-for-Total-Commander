@@ -52,3 +52,6 @@ v 2.8
 - fix: generic memory leak and memory handling improvements
 - build: Visual Studio project now includes resource.rc/resource.h so generated binaries carry version metadata
 - build: ReleaseXP|Win32 is aligned with the XP-capable v141_xp toolset and legacy SDK support in current Visual Studio setups
+
+v 3.0
+- add: char with spaces count
