@@ -7,3 +7,5 @@ EXPORTS
     ListSendCommand @6
     ListSetDefaultParams @7
     ListSearchTextW @8
+    ListLoadNext @9
+    ListLoadNextW @10

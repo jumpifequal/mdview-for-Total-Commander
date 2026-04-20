@@ -21,7 +21,7 @@ VS_VERSION_INFO VERSIONINFO
 #else
                 VALUE "OriginalFilename", "mdview.wlx"
 #endif
-                VALUE "LegalCopyright", "Copyright (c) Nigurrath, 2026"
+                VALUE "LegalCopyright", "Copyright \xA9 Nigurrath, 2026"
                 VALUE "ProductVersion", VER_PRODUCTVERSION_STR
                 VALUE "ProductName", "Markdown Viewer Lister Plugin"
                 VALUE "InternalName", "MDView"

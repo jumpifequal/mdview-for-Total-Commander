@@ -56,6 +56,7 @@
 #include <mshtml.h>
 #include <mshtmhst.h>
 #include <docobj.h>
+#include <shellapi.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,7 +77,7 @@ typedef struct {
 
 static LRESULT CALLBACK ContainerWndProc(HWND, UINT, WPARAM, LPARAM);
 static char* read_file_utf8(const char*);
-static char* md_to_html(const char*);
+static char* md_to_html(const char*, const char*);
 static int   is_dark_theme(void);
 static void  navigate_to_html(IWebBrowser2*, const char*);
 static LONG_PTR mdview_set_window_ptr(HWND, int, LONG_PTR);
@@ -100,7 +101,13 @@ typedef struct {
     int           syncGuard;     /* recursion guard for scroll sync */
     size_t        rawCharCount;  /* UTF-8 codepoint count for raw markdown */
     char*         mdUtf8;        /* raw markdown (UTF-8), owned */
+    char*         currentFile;   /* current file path (UTF-8), owned */
 } MDViewData;
+
+static int load_file_into_existing_view(MDViewData*, const char*);
+
+#define MDVIEW_SYNC_TIMER_ID 1
+#define MDVIEW_SYNC_TIMER_MS 120
 
 /* ── INI Settings Persistence ────────────────────────────────────────── */
 
@@ -290,6 +297,33 @@ static wchar_t* utf8_to_wide_dup(const char* s) {
     return w;
 }
 
+static char* wide_to_utf8_dup(const wchar_t* ws) {
+    char* s;
+    int len;
+
+    if (!ws) return NULL;
+    len = WideCharToMultiByte(CP_UTF8, 0, ws, -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return NULL;
+    s = (char*)malloc((size_t)len);
+    if (!s) return NULL;
+    if (WideCharToMultiByte(CP_UTF8, 0, ws, -1, s, len, NULL, NULL) <= 0) {
+        free(s);
+        return NULL;
+    }
+    return s;
+}
+
+static char* mdview_strdup(const char* s) {
+    size_t n;
+    char* out;
+    if (!s) return NULL;
+    n = strlen(s) + 1;
+    out = (char*)malloc(n);
+    if (!out) return NULL;
+    memcpy(out, s, n);
+    return out;
+}
+
 static size_t utf8_char_count(const char* s) {
     size_t count = 0;
     const unsigned char* p = (const unsigned char*)s;
@@ -329,6 +363,110 @@ static int get_document_title_utf8(IWebBrowser2* pB, char* out, int outsz) {
     WideCharToMultiByte(CP_UTF8, 0, bTitle, -1, out, outsz, NULL, NULL);
     SysFreeString(bTitle);
     return 1;
+}
+
+static int hex_value(int ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    return -1;
+}
+
+static char* url_percent_decode_dup(const char* s) {
+    size_t i, len, outLen = 0;
+    char* out;
+    if (!s) return NULL;
+    len = strlen(s);
+    out = (char*)malloc(len + 1);
+    if (!out) return NULL;
+    for (i = 0; i < len; ++i) {
+        if (s[i] == '%' && i + 2 < len) {
+            int hi = hex_value((unsigned char)s[i + 1]);
+            int lo = hex_value((unsigned char)s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out[outLen++] = (char)((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out[outLen++] = (s[i] == '+') ? ' ' : s[i];
+    }
+    out[outLen] = '\0';
+    return out;
+}
+
+static char* file_url_to_path_utf8_dup(const char* url) {
+    const char* p;
+    char* decoded;
+    char* hash;
+    size_t i;
+
+    if (!url || _strnicmp(url, "file://", 7) != 0) return NULL;
+    p = url + 7;
+    decoded = url_percent_decode_dup(p);
+    if (!decoded) return NULL;
+
+    hash = strchr(decoded, '#');
+    if (hash) *hash = '\0';
+
+    if (decoded[0] == '/' &&
+        ((decoded[1] >= 'A' && decoded[1] <= 'Z') || (decoded[1] >= 'a' && decoded[1] <= 'z')) &&
+        decoded[2] == ':') {
+        memmove(decoded, decoded + 1, strlen(decoded));
+    }
+
+    for (i = 0; decoded[i]; ++i) {
+        if (decoded[i] == '/') decoded[i] = '\\';
+    }
+    return decoded;
+}
+
+static int is_markdown_file_path(const char* path) {
+    const char* dot;
+    if (!path) return 0;
+    dot = strrchr(path, '.');
+    if (!dot) return 0;
+    return _stricmp(dot, ".md") == 0 ||
+           _stricmp(dot, ".markdown") == 0 ||
+           _stricmp(dot, ".mkd") == 0 ||
+           _stricmp(dot, ".mkdn") == 0;
+}
+
+static void handle_pending_link_command(MDViewData* d) {
+    char title[4096];
+    char* decoded = NULL;
+    char* localPath = NULL;
+
+    if (!d || !d->pBrowser) return;
+    if (!get_document_title_utf8(d->pBrowser, title, (int)sizeof(title))) return;
+    if (strncmp(title, "MDVLINK:", 8) != 0) return;
+
+    decoded = url_percent_decode_dup(title + 8);
+    if (!decoded) goto clear;
+
+    if (_strnicmp(decoded, "file://", 7) == 0) {
+        localPath = file_url_to_path_utf8_dup(decoded);
+        if (localPath && is_markdown_file_path(localPath)) {
+            load_file_into_existing_view(d, localPath);
+        } else {
+            wchar_t* w = utf8_to_wide_dup(localPath ? localPath : decoded);
+            if (w) {
+                ShellExecuteW(NULL, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+                free(w);
+            }
+        }
+    } else {
+        wchar_t* w = utf8_to_wide_dup(decoded);
+        if (w) {
+            ShellExecuteW(NULL, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+            free(w);
+        }
+    }
+
+clear:
+    if (decoded) free(decoded);
+    if (localPath) free(localPath);
+    exec_js(d->pBrowser, L"document.title='MDView';");
 }
 
 static double get_html_scroll_ratio(MDViewData* d) {
@@ -438,6 +576,52 @@ static void sync_edit_to_html(MDViewData* d) {
     d->syncGuard = 0;
 }
 
+typedef struct {
+    int fontSize;
+    int maxWidth;
+    int lineNums;
+    int darkMode;
+    int findVisible;
+    int tocVisible;
+    int helpVisible;
+    int hasMatches;
+    int editableActive;
+} MDViewHtmlState;
+
+static int get_html_state(MDViewData* d, MDViewHtmlState* st) {
+    char t[160];
+    if (!d || !d->pBrowser || !st) return 0;
+    ZeroMemory(st, sizeof(*st));
+    exec_js(d->pBrowser,
+        L"(function(){var fb=document.getElementById('mdv-fb'),toc=document.getElementById('mdv-toc'),"
+        L"h=document.getElementById('mdv-help'),a=document.activeElement,"
+        L"ed=(!!a&&((a.tagName==='INPUT')||(a.tagName==='TEXTAREA')||a.isContentEditable));"
+        L"document.title='MDVSTATE:'+fs+','+mw+','+ln+','+(document.body.className.indexOf('dark')>=0?1:0)+','+"
+        L"((fb&&fb.className.indexOf('on')>=0)?1:0)+','+((toc&&toc.className.indexOf('on')>=0)?1:0)+','+"
+        L"((h&&h.className.indexOf('on')>=0)?1:0)+','+((typeof fm!=='undefined'&&fm&&fm.length)?1:0)+','+(ed?1:0);})();");
+    if (!get_document_title_utf8(d->pBrowser, t, (int)sizeof(t))) return 0;
+    if (strncmp(t, "MDVSTATE:", 9) != 0) return 0;
+    return sscanf_s(t + 9, "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+        &st->fontSize, &st->maxWidth, &st->lineNums, &st->darkMode,
+        &st->findVisible, &st->tocVisible, &st->helpVisible,
+        &st->hasMatches, &st->editableActive) == 9;
+}
+
+static HWND get_root_parent(HWND hwnd) {
+    HWND w = hwnd;
+    while (w) {
+        HWND p = GetParent(w);
+        if (!p) break;
+        w = p;
+    }
+    return w;
+}
+
+static void forward_key_to_lister(HWND hwnd, WPARAM wP, LPARAM lP) {
+    HWND root = get_root_parent(hwnd);
+    if (root) PostMessageW(root, WM_KEYDOWN, wP, lP);
+}
+
 static void layout_views(MDViewData* d) {
     if (!d || !d->hwndContainer || !d->pBrowser) return;
 
@@ -505,6 +689,10 @@ static LRESULT CALLBACK TextViewSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
 
     if (msg == WM_KEYDOWN) {
         int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
+        if (!ctrl && ((wP >= '1' && wP <= '9') || wP == 'N' || wP == 'P')) {
+            forward_key_to_lister(hwnd, wP, lP);
+            return 0;
+        }
         if (ctrl) {
             if (wP == 'M') { toggle_split_view(d); return 0; }
             if (wP == 'A') { SendMessageW(hwnd, EM_SETSEL, 0, -1); return 0; }
@@ -531,11 +719,16 @@ static LRESULT CALLBACK TextViewSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
         if (wP == VK_F3) {
             if (d->hwndIEServer) SetFocus(d->hwndIEServer);
             if (d->pBrowser) {
-                if (GetKeyState(VK_SHIFT) & 0x8000) 
-                    exec_js(d->pBrowser, L"fp()");
-                else 
-                    exec_js(d->pBrowser, L"fn()");
+                if (GetKeyState(VK_SHIFT) & 0x8000)
+                    exec_js(d->pBrowser, L"hkf(1)");
+                else
+                    exec_js(d->pBrowser, L"hkf(0)");
             }
+            return 0;
+        }
+        if (wP == VK_F7) {
+            if (d->hwndIEServer) SetFocus(d->hwndIEServer);
+            if (d->pBrowser) exec_js(d->pBrowser, L"sf()");
             return 0;
         }
     }
@@ -634,6 +827,8 @@ static void toggle_split_view(MDViewData* d) {
 
 static void show_context_menu(MDViewData* d, HWND hwnd, int x, int y) {
     if (!d) return;
+    MDViewHtmlState st;
+    int hasState = get_html_state(d, &st);
 
     HMENU hMenu = CreatePopupMenu();
     if (!hMenu) return;
@@ -645,15 +840,21 @@ static void show_context_menu(MDViewData* d, HWND hwnd, int x, int y) {
 
     AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_IN,    L"Zoom in\tCtrl++");
     AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_OUT,   L"Zoom out\tCtrl+-");
-    AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_RESET, L"Reset zoom\tCtrl+0");
+    {
+        wchar_t zoomLabel[96];
+        int zoomPct = 100;
+        if (hasState && st.fontSize > 0) zoomPct = (st.fontSize * 100 + 9) / 19;
+        _snwprintf_s(zoomLabel, _countof(zoomLabel), _TRUNCATE, L"Reset zoom\tCtrl+0 (%d%%)", zoomPct);
+        AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_RESET, zoomLabel);
+    }
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
 
-    AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE_DARK,     L"Toggle dark mode\tCtrl+D");
-    AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE_TOC,      L"Toggle table of contents\tCtrl+T");
+    AppendMenuW(hMenu, MF_STRING | ((hasState && st.darkMode) ? MF_CHECKED : 0), IDM_TOGGLE_DARK,     L"Toggle dark mode\tCtrl+D");
+    AppendMenuW(hMenu, MF_STRING | ((hasState && st.tocVisible) ? MF_CHECKED : 0), IDM_TOGGLE_TOC,      L"Toggle table of contents\tCtrl+T");
     AppendMenuW(hMenu, MF_STRING, IDM_SEARCH,          L"Search\tCtrl+F");
     AppendMenuW(hMenu, MF_STRING, IDM_PRINT,           L"Print\tCtrl+P");
     AppendMenuW(hMenu, MF_STRING, IDM_TOP,             L"Scroll to top\tCtrl+G");
-    AppendMenuW(hMenu, MF_STRING, IDM_TOGGLE_LINEWRAP, L"Toggle line wrap\tCtrl+L");
+    AppendMenuW(hMenu, MF_STRING | ((hasState && st.lineNums) ? MF_CHECKED : 0), IDM_TOGGLE_LINEWRAP, L"Line numbers\tCtrl+L");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
 
     AppendMenuW(hMenu, MF_STRING, IDM_WIDTH_TOGGLE, L"Toggle content width\tCtrl+W");
@@ -728,7 +929,14 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
     if (!d) return DefWindowProcW(hwnd, msg, wP, lP);
 
     if (msg == WM_KEYDOWN) {
+        MDViewHtmlState st;
+        int hasState = get_html_state(d, &st);
         int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
+        if (!ctrl && hasState && !st.editableActive &&
+            ((wP >= '1' && wP <= '9') || wP == 'N' || wP == 'P')) {
+            forward_key_to_lister(hwnd, wP, lP);
+            return 0;
+        }
         if (ctrl) {
             switch (wP) {
             case VK_OEM_PLUS: case VK_ADD:
@@ -770,11 +978,14 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
         if (wP == VK_F1) {
             exec_js(d->pBrowser, L"th()"); return 0;
         }
+        if (wP == VK_F7) {
+            exec_js(d->pBrowser, L"sf()"); return 0;
+        }
         if (wP == VK_F3) {
-            if (GetKeyState(VK_SHIFT) & 0x8000) 
-                exec_js(d->pBrowser, L"fp()");
-            else 
-                exec_js(d->pBrowser, L"fn()");
+            if (GetKeyState(VK_SHIFT) & 0x8000)
+                exec_js(d->pBrowser, L"hkf(1)");
+            else
+                exec_js(d->pBrowser, L"hkf(0)");
             return 0;
         }
         
@@ -977,6 +1188,29 @@ static void sb_append_esc(StrBuf* sb, const char* s, size_t n) {
     }
 }
 
+static int is_inline_html_tag_at(const char* t, size_t len, size_t pos, size_t* endPos) {
+    size_t j;
+    if (!t || pos >= len || t[pos] != '<') return 0;
+    j = pos + 1;
+    if (j < len && (t[j] == '!' || t[j] == '?' || t[j] == '/')) j++;
+    if (j >= len || !isalpha((unsigned char)t[j])) return 0;
+    while (j < len && t[j] != '>') j++;
+    if (j >= len) return 0;
+    if (endPos) *endPos = j + 1;
+    return 1;
+}
+
+static int html_table_delta(const char* s) {
+    int delta = 0;
+    const char* p = s;
+    while ((p = strchr(p, '<')) != NULL) {
+        if (_strnicmp(p, "<table", 6) == 0) delta++;
+        else if (_strnicmp(p, "</table", 7) == 0) delta--;
+        p++;
+    }
+    return delta;
+}
+
 static int is_mermaid_lang(const char* lang) {
     if (!lang) return 0;
     while (*lang == ' ' || *lang == '\t') lang++;
@@ -1005,11 +1239,189 @@ static int is_safe_url_scheme(const char* url, size_t len, int allowMailto) {
     return 0;
 }
 
+static int is_file_url_scheme(const char* url, size_t len) {
+    if (!url || len < 7) return 0;
+    return _strnicmp(url, "file://", 7) == 0;
+}
+
+static char* trim_url_slice_dup(const char* url, size_t len) {
+    size_t start = 0;
+    size_t end = len;
+    char* out;
+
+    while (start < len && (url[start] == ' ' || url[start] == '\t' || url[start] == '\r' || url[start] == '\n')) {
+        start++;
+    }
+    while (end > start && (url[end - 1] == ' ' || url[end - 1] == '\t' || url[end - 1] == '\r' || url[end - 1] == '\n')) {
+        end--;
+    }
+
+    out = (char*)malloc(end - start + 1);
+    if (!out) return NULL;
+    if (end > start) memcpy(out, url + start, end - start);
+    out[end - start] = '\0';
+    return out;
+}
+
+static int is_windows_absolute_path_utf8(const char* path) {
+    if (!path || !path[0]) return 0;
+    if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+        path[1] == ':' && (path[2] == '\\' || path[2] == '/')) {
+        return 1;
+    }
+    if ((path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/')) return 1;
+    return 0;
+}
+
+static int is_probably_relative_markdown_url(const char* url) {
+    if (!url || !url[0]) return 0;
+    if (url[0] == '#') return 0;
+    if (is_safe_url_scheme(url, strlen(url), 1)) return 0;
+    if (is_windows_absolute_path_utf8(url)) return 1;
+    if (url[0] == '/' || url[0] == '\\') return 1;
+    return 1;
+}
+
+static void sb_append_url_encoded(StrBuf* sb, const char* s) {
+    static const char hex[] = "0123456789ABCDEF";
+    const unsigned char* p = (const unsigned char*)s;
+    while (*p) {
+        unsigned char ch = *p++;
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+            ch == '-' || ch == '_' || ch == '.' || ch == '~' || ch == '/' || ch == ':') {
+            char cbuf[2];
+            cbuf[0] = (char)ch;
+            cbuf[1] = '\0';
+            sb_append(sb, cbuf);
+        } else {
+            char enc[4];
+            enc[0] = '%';
+            enc[1] = hex[(ch >> 4) & 0x0F];
+            enc[2] = hex[ch & 0x0F];
+            enc[3] = '\0';
+            sb_append(sb, enc);
+        }
+    }
+}
+
+static char* file_url_from_utf8_path(const char* pathUtf8) {
+    StrBuf sb;
+    const char* p;
+
+    if (!pathUtf8 || !pathUtf8[0]) return NULL;
+    sb_init(&sb);
+    if (!sb.data) return NULL;
+
+    if (is_windows_absolute_path_utf8(pathUtf8) &&
+        (pathUtf8[0] == '\\' || pathUtf8[0] == '/') &&
+        (pathUtf8[1] == '\\' || pathUtf8[1] == '/')) {
+        sb_append(&sb, "file:");
+    } else {
+        sb_append(&sb, "file:///");
+    }
+
+    for (p = pathUtf8; *p; ++p) {
+        if (*p == '\\') {
+            sb_append(&sb, "/");
+        } else {
+            char chunk[2];
+            chunk[0] = *p;
+            chunk[1] = '\0';
+            sb_append_url_encoded(&sb, chunk);
+        }
+    }
+
+    return sb.data;
+}
+
+static char* resolve_markdown_url(const char* currentFile, const char* url, size_t len) {
+    char* trimmed;
+    char* fragment = NULL;
+    char* query = NULL;
+    char* pathPart;
+    char* result = NULL;
+    char* fileUrl = NULL;
+    wchar_t* currentWide = NULL;
+    wchar_t* baseWide = NULL;
+    wchar_t* relWide = NULL;
+    wchar_t joined[MAX_PATH];
+    wchar_t absolute[MAX_PATH];
+    wchar_t* filePart;
+    DWORD fullLen;
+    char* absoluteUtf8 = NULL;
+    char* qmark;
+    char* hash;
+    size_t resultLen;
+
+    trimmed = trim_url_slice_dup(url, len);
+    if (!trimmed) return NULL;
+    if (!trimmed[0]) return trimmed;
+    if (!is_probably_relative_markdown_url(trimmed) || !currentFile || !currentFile[0]) return trimmed;
+
+    hash = strchr(trimmed, '#');
+    if (hash) {
+        fragment = mdview_strdup(hash);
+        *hash = '\0';
+    }
+    qmark = strchr(trimmed, '?');
+    if (qmark) {
+        query = mdview_strdup(qmark);
+        *qmark = '\0';
+    }
+    pathPart = trimmed;
+
+    currentWide = utf8_to_wide_dup(currentFile);
+    relWide = utf8_to_wide_dup(pathPart);
+    if (!currentWide || !relWide) goto done;
+
+    memcpy(joined, currentWide, sizeof(joined));
+    filePart = wcsrchr(joined, L'\\');
+    if (!filePart) filePart = wcsrchr(joined, L'/');
+    if (filePart) {
+        filePart[1] = L'\0';
+    } else {
+        joined[0] = L'\0';
+    }
+    baseWide = joined;
+
+    if (is_windows_absolute_path_utf8(pathPart)) {
+        fullLen = GetFullPathNameW(relWide, MAX_PATH, absolute, NULL);
+    } else {
+        wchar_t combined[MAX_PATH];
+        combined[0] = L'\0';
+        wcsncat_s(combined, MAX_PATH, baseWide, _TRUNCATE);
+        wcsncat_s(combined, MAX_PATH, relWide, _TRUNCATE);
+        fullLen = GetFullPathNameW(combined, MAX_PATH, absolute, NULL);
+    }
+    if (fullLen == 0 || fullLen >= MAX_PATH) goto done;
+
+    absoluteUtf8 = wide_to_utf8_dup(absolute);
+    if (!absoluteUtf8) goto done;
+    fileUrl = file_url_from_utf8_path(absoluteUtf8);
+    if (!fileUrl) goto done;
+
+    resultLen = strlen(fileUrl) + (query ? strlen(query) : 0) + (fragment ? strlen(fragment) : 0) + 1;
+    result = (char*)malloc(resultLen);
+    if (!result) goto done;
+    snprintf(result, resultLen, "%s%s%s", fileUrl, query ? query : "", fragment ? fragment : "");
+
+done:
+    if (!result) result = trimmed; else free(trimmed);
+    if (fragment) free(fragment);
+    if (query) free(query);
+    if (currentWide) free(currentWide);
+    if (relWide) free(relWide);
+    if (absoluteUtf8) free(absoluteUtf8);
+    if (fileUrl) free(fileUrl);
+    return result;
+}
+
 /* ── Markdown Inline Parser ──────────────────────────────────────────── */
 
-static void parse_inline(StrBuf* sb, const char* t, size_t len) {
+static void parse_inline(StrBuf* sb, const char* t, size_t len, const char* currentFile) {
     size_t i = 0;
     while (i < len) {
+        size_t htmlEnd = 0;
         /* Backslash escape */
         if (t[i]=='\\' && i+1<len) {
             char nx=t[i+1];
@@ -1020,6 +1432,17 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
         if (t[i]==' ' && i+1<len && t[i+1]==' ') {
             size_t j=i+2; while(j<len&&t[j]==' ')j++;
             if(j<len&&t[j]=='\n'){ sb_append(sb,"<br>\n"); i=j+1; continue; }
+        }
+        /* Inline HTML tag passthrough */
+        if (t[i] == '<' && is_inline_html_tag_at(t, len, i, &htmlEnd)) {
+            if (htmlEnd > i) {
+                if (!sb_ensure(sb, htmlEnd - i)) return;
+                memcpy(sb->data + sb->len, t + i, htmlEnd - i);
+                sb->len += (htmlEnd - i);
+                sb->data[sb->len] = '\0';
+                i = htmlEnd;
+                continue;
+            }
         }
         /* Inline code */
         if (t[i]=='`') {
@@ -1040,13 +1463,17 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
             if(j<len&&j+1<len&&t[j+1]=='('){
                 size_t us=j+2,ue=us; while(ue<len&&t[ue]!=')')ue++;
                 if(ue<len){
-                    if (is_safe_url_scheme(t + us, ue - us, 0)) {
+                    char* resolved = resolve_markdown_url(currentFile, t + us, ue - us);
+                    if (resolved && (is_safe_url_scheme(resolved, strlen(resolved), 0) ||
+                                     is_file_url_scheme(resolved, strlen(resolved)) ||
+                                     is_probably_relative_markdown_url(resolved))) {
                         sb_append(sb,"<img alt=\""); sb_append_esc(sb,t+as,j-as);
-                        sb_append(sb,"\" src=\""); sb_append_esc(sb,t+us,ue-us);
+                        sb_append(sb,"\" src=\""); sb_append_esc(sb,resolved,strlen(resolved));
                         sb_append(sb,"\" style=\"max-width:100%\">");
                     } else {
                         sb_append_esc(sb, t + i, ue + 1 - i);
                     }
+                    if (resolved) free(resolved);
                     i=ue+1; continue;
                 }
             }
@@ -1058,12 +1485,16 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
             if(j<len&&j+1<len&&t[j+1]=='('){
                 size_t us=j+2,ue=us; while(ue<len&&t[ue]!=')')ue++;
                 if(ue<len){
-                    if (is_safe_url_scheme(t + us, ue - us, 1)) {
-                        sb_append(sb,"<a href=\""); sb_append_esc(sb,t+us,ue-us);
-                        sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts); sb_append(sb,"</a>");
+                    char* resolved = resolve_markdown_url(currentFile, t + us, ue - us);
+                    if (resolved && (is_safe_url_scheme(resolved, strlen(resolved), 1) ||
+                                     is_file_url_scheme(resolved, strlen(resolved)) ||
+                                     resolved[0] == '#')) {
+                        sb_append(sb,"<a href=\""); sb_append_esc(sb,resolved,strlen(resolved));
+                        sb_append(sb,"\">"); parse_inline(sb,t+ts,j-ts,currentFile); sb_append(sb,"</a>");
                     } else {
                         sb_append_esc(sb, t + i, ue + 1 - i);
                     }
+                    if (resolved) free(resolved);
                     i=ue+1; continue;
                 }
             }
@@ -1071,24 +1502,24 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len) {
         /* Strikethrough ~~text~~ */
         if (t[i]=='~'&&i+1<len&&t[i+1]=='~') {
             size_t s2=i+2,e2=s2; while(e2+1<len&&!(t[e2]=='~'&&t[e2+1]=='~'))e2++;
-            if(e2+1<len){ sb_append(sb,"<del>"); parse_inline(sb,t+s2,e2-s2); sb_append(sb,"</del>"); i=e2+2; continue; }
+            if(e2+1<len){ sb_append(sb,"<del>"); parse_inline(sb,t+s2,e2-s2,currentFile); sb_append(sb,"</del>"); i=e2+2; continue; }
         }
         /* Bold+Italic ***text*** */
         if ((t[i]=='*'||t[i]=='_')&&i+2<len&&t[i+1]==t[i]&&t[i+2]==t[i]) {
             char m=t[i]; size_t s3=i+3,e3=s3;
             while(e3+2<len&&!(t[e3]==m&&t[e3+1]==m&&t[e3+2]==m))e3++;
-            if(e3+2<len){ sb_append(sb,"<strong><em>"); parse_inline(sb,t+s3,e3-s3); sb_append(sb,"</em></strong>"); i=e3+3; continue; }
+            if(e3+2<len){ sb_append(sb,"<strong><em>"); parse_inline(sb,t+s3,e3-s3,currentFile); sb_append(sb,"</em></strong>"); i=e3+3; continue; }
         }
         /* Bold **text** */
         if ((t[i]=='*'||t[i]=='_')&&i+1<len&&t[i+1]==t[i]) {
             char m=t[i]; size_t s2=i+2,e2=s2;
             while(e2+1<len&&!(t[e2]==m&&t[e2+1]==m))e2++;
-            if(e2+1<len&&e2>s2){ sb_append(sb,"<strong>"); parse_inline(sb,t+s2,e2-s2); sb_append(sb,"</strong>"); i=e2+2; continue; }
+            if(e2+1<len&&e2>s2){ sb_append(sb,"<strong>"); parse_inline(sb,t+s2,e2-s2,currentFile); sb_append(sb,"</strong>"); i=e2+2; continue; }
         }
         /* Italic *text* */
         if ((t[i]=='*'||t[i]=='_')&&i+1<len&&t[i+1]!=t[i]&&t[i+1]!=' ') {
             char m=t[i]; size_t s1=i+1,e1=s1; while(e1<len&&t[e1]!=m)e1++;
-            if(e1<len&&e1>s1&&t[e1-1]!=' '){ sb_append(sb,"<em>"); parse_inline(sb,t+s1,e1-s1); sb_append(sb,"</em>"); i=e1+1; continue; }
+            if(e1<len&&e1>s1&&t[e1-1]!=' '){ sb_append(sb,"<em>"); parse_inline(sb,t+s1,e1-s1,currentFile); sb_append(sb,"</em>"); i=e1+1; continue; }
         }
         /* Autolink bare URLs */
         if (i+8<len&&(strncmp(t+i,"https://",8)==0||strncmp(t+i,"http://",7)==0)) {
@@ -1162,7 +1593,7 @@ static int is_ol(const char* t) { int i=0; while(t[i]>='0'&&t[i]<='9')i++; if(i=
 
 /* ── Markdown Block Parser ───────────────────────────────────────────── */
 
-static char* md_to_html(const char* markdown) {
+static char* md_to_html(const char* markdown, const char* currentFile) {
     StrBuf sb; sb_init(&sb);
     Lines lines = split_lines(markdown);
     if (!sb.data || !lines.lines) {
@@ -1178,6 +1609,30 @@ static char* md_to_html(const char* markdown) {
         const char* tr = line + indent;
 
         if (tr[0]=='\0') { i++; continue; }
+
+        /* YAML front matter at document start */
+        if (i == 0 && strcmp(tr, "---") == 0) {
+            int j = i + 1;
+            while (j < lines.count) {
+                const char* endLine = lines.lines[j];
+                int endIndent = get_indent(endLine);
+                const char* endTr = endLine + endIndent;
+                if (strcmp(endTr, "---") == 0) break;
+                j++;
+            }
+            if (j < lines.count) {
+                sb_append(&sb, "<pre><code class=\"language-yaml\">");
+                i++;
+                while (i < j) {
+                    if (sb.data[sb.len - 1] != '>') sb_append(&sb, "\n");
+                    sb_append_esc(&sb, lines.lines[i], strlen(lines.lines[i]));
+                    i++;
+                }
+                sb_append(&sb, "</code></pre>\n");
+                i++; /* consume closing --- */
+                continue;
+            }
+        }
 
         /* Fenced code block */
         if (strncmp(tr,"```",3)==0 || strncmp(tr,"~~~",3)==0) {
@@ -1234,7 +1689,7 @@ static char* md_to_html(const char* markdown) {
                 char idnum[16]; _snprintf(idnum, sizeof(idnum), "%d", i);
                 sb_append(&sb,"<"); sb_append(&sb,tag); sb_append(&sb," id=\"mdv-h");
                 sb_append(&sb,idnum); sb_append(&sb,"\">");
-                parse_inline(&sb,c,cl);
+                parse_inline(&sb,c,cl,currentFile);
                 sb_append(&sb,"</"); sb_append(&sb,tag); sb_append(&sb,">\n"); i++; continue;
             }
         }
@@ -1243,8 +1698,8 @@ static char* md_to_html(const char* markdown) {
         if (i+1<lines.count && tr[0]!='\0') {
             const char* nx=lines.lines[i+1]; while(*nx==' ')nx++; int nl=(int)strlen(nx);
             if(nl>=1){ int ae=1,ad=1; for(int j=0;j<nl;j++){if(nx[j]!='=')ae=0;if(nx[j]!='-')ad=0;}
-                if(ae){ sb_append(&sb,"<h1>"); parse_inline(&sb,tr,strlen(tr)); sb_append(&sb,"</h1>\n"); i+=2; continue; }
-                if(ad&&!is_hr(lines.lines[i+1])){ sb_append(&sb,"<h2>"); parse_inline(&sb,tr,strlen(tr)); sb_append(&sb,"</h2>\n"); i+=2; continue; }
+                if(ae){ sb_append(&sb,"<h1>"); parse_inline(&sb,tr,strlen(tr),currentFile); sb_append(&sb,"</h1>\n"); i+=2; continue; }
+                if(ad&&!is_hr(lines.lines[i+1])){ sb_append(&sb,"<h2>"); parse_inline(&sb,tr,strlen(tr),currentFile); sb_append(&sb,"</h2>\n"); i+=2; continue; }
             }
         }
 
@@ -1258,9 +1713,23 @@ static char* md_to_html(const char* markdown) {
                 if(bl[0]=='>'&&(bl[1]==' '||bl[1]=='\0')){if(bq.len>0)sb_append(&bq,"\n");sb_append(&bq,bl[1]==' '?bl+2:bl+1);i++;}
                 else if(bl[0]=='\0')break; else{sb_append(&bq,"\n");sb_append(&bq,bl);i++;}
             }
-            char* inner=md_to_html(bq.data);
+            char* inner=md_to_html(bq.data, currentFile);
             sb_append(&sb,"<blockquote>\n"); sb_append(&sb,inner); sb_append(&sb,"</blockquote>\n");
             free(inner); free(bq.data); continue;
+        }
+
+        /* Raw HTML table block passthrough */
+        if (_strnicmp(tr, "<table", 6) == 0) {
+            int depth = 0;
+            while (i < lines.count) {
+                const char* raw = lines.lines[i];
+                depth += html_table_delta(raw);
+                sb_append(&sb, raw);
+                sb_append(&sb, "\n");
+                i++;
+                if (depth <= 0) break;
+            }
+            continue;
         }
 
         /* Table */
@@ -1270,7 +1739,7 @@ static char* md_to_html(const char* markdown) {
             sb_append(&sb,"<table>\n<thead>\n<tr>\n");
             for(int c=0;c<nc;c++){
                 sb_append(&sb,"<th"); if(al[c]=='c')sb_append(&sb," style=\"text-align:center\""); else if(al[c]=='r')sb_append(&sb," style=\"text-align:right\"");
-                sb_append(&sb,">"); parse_inline(&sb,cells[c],strlen(cells[c])); sb_append(&sb,"</th>\n");
+                sb_append(&sb,">"); parse_inline(&sb,cells[c],strlen(cells[c]),currentFile); sb_append(&sb,"</th>\n");
             }
             sb_append(&sb,"</tr>\n</thead>\n<tbody>\n"); i+=2;
             while(i<lines.count){ const char* rl=lines.lines[i]; while(*rl==' ')rl++;
@@ -1278,7 +1747,7 @@ static char* md_to_html(const char* markdown) {
                 int rc=parse_trow(lines.lines[i],cells,64); sb_append(&sb,"<tr>\n");
                 for(int c=0;c<nc;c++){
                     sb_append(&sb,"<td"); if(al[c]=='c')sb_append(&sb," style=\"text-align:center\""); else if(al[c]=='r')sb_append(&sb," style=\"text-align:right\"");
-                    sb_append(&sb,">"); if(c<rc)parse_inline(&sb,cells[c],strlen(cells[c])); sb_append(&sb,"</td>\n");
+                    sb_append(&sb,">"); if(c<rc)parse_inline(&sb,cells[c],strlen(cells[c]),currentFile); sb_append(&sb,"</td>\n");
                 }
                 sb_append(&sb,"</tr>\n"); i++;
             }
@@ -1301,13 +1770,13 @@ static char* md_to_html(const char* markdown) {
                     else if(strncmp(ic,"[x] ",4)==0||strncmp(ic,"[X] ",4)==0){task=1;chk=1;ic+=4;}
                     sb_append(&sb,"<li>");
                     if(task) sb_append(&sb,chk?"<input type=\"checkbox\" checked disabled> ":"<input type=\"checkbox\" disabled> ");
-                    parse_inline(&sb,ic,strlen(ic)); i++;
+                    parse_inline(&sb,ic,strlen(ic),currentFile); i++;
                     StrBuf nest; sb_init(&nest); int hn=0;
                     while(i<lines.count){ const char* nl=lines.lines[i]; int ni=get_indent(nl); const char* nt=nl+ni;
                         if(nt[0]=='\0'){if(i+1<lines.count&&get_indent(lines.lines[i+1])>bi+1){sb_append(&nest,"\n");i++;hn=1;continue;}break;}
                         if(ni>bi+1){if(nest.len>0)sb_append(&nest,"\n");sb_append(&nest,nl);hn=1;i++;}else break;
                     }
-                    if(hn){char* nh=md_to_html(nest.data);sb_append(&sb,"\n");sb_append(&sb,nh);free(nh);}
+                    if(hn){char* nh=md_to_html(nest.data, currentFile);sb_append(&sb,"\n");sb_append(&sb,nh);free(nh);}
                     free(nest.data); sb_append(&sb,"</li>\n");
                 } else i++;
             }
@@ -1330,7 +1799,7 @@ static char* md_to_html(const char* markdown) {
                     pi=get_indent(lines.lines[i]); tr=lines.lines[i]+pi;
                 }
             }
-            sb_append(&sb,"<p>"); parse_inline(&sb,para.data,para.len); sb_append(&sb,"</p>\n");
+            sb_append(&sb,"<p>"); parse_inline(&sb,para.data,para.len,currentFile); sb_append(&sb,"</p>\n");
             free(para.data);
         }
     }
@@ -1474,7 +1943,7 @@ static void build_css(StrBuf* sb) {
     "body.dark #mdv-fi{background:#1e1e1e;border-color:#555;color:#d4d4d4}"
     "#mdv-fi:focus{border-color:#0366d6}"
     "body.dark #mdv-fi:focus{border-color:#569cd6}"
-    "#mdv-fc{color:#6a737d;min-width:70px;font-size:12px}"
+    "#mdv-fc{color:#6a737d;min-width:84px;font-size:12px}"
     ".fb{padding:3px 10px;border:1px solid #bbb;border-radius:3px;"
     "background:#e0e0e0;color:#24292e;cursor:pointer;font-size:13px}"
     "body.dark .fb{background:#404040;border-color:#555;color:#d4d4d4}"
@@ -1519,14 +1988,23 @@ static void build_css(StrBuf* sb) {
     "border:1px solid #d0d7de;color:#57606a;font:12px 'Segoe UI',sans-serif;"
     "box-shadow:0 3px 12px rgba(0,0,0,.10);pointer-events:none}"
     "body.dark #mdv-char{background:rgba(37,37,38,.94);border-color:#444;color:#c9d1d9}"
+    "#mdv-status{position:fixed;left:16px;bottom:16px;z-index:10002;"
+    "padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.92);"
+    "border:1px solid #d0d7de;color:#57606a;font:12px 'Segoe UI',sans-serif;"
+    "box-shadow:0 3px 12px rgba(0,0,0,.10);pointer-events:none}"
+    "body.dark #mdv-status{background:rgba(37,37,38,.94);border-color:#444;color:#c9d1d9}"
 
     /* Help overlay */
     "#mdv-help{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);"
     "background:#ffffff;border:1px solid #ccc;border-radius:12px;"
     "padding:28px 36px;z-index:10003;box-shadow:0 12px 48px rgba(0,0,0,.35);"
-    "font:16px 'Segoe UI',sans-serif;min-width:440px;max-width:520px;color:#24292e}"
+    "font:16px 'Segoe UI',sans-serif;min-width:440px;max-width:520px;"
+    "max-height:calc(100vh - 32px);width:calc(100vw - 32px);overflow:auto;color:#24292e}"
     "body.dark #mdv-help{background:#2d2d2d;border-color:#555;color:#d4d4d4}"
     "#mdv-help.on{display:block}"
+    "#mdv-help-close{position:absolute;top:10px;right:12px;border:none;background:transparent;"
+    "font-size:28px;line-height:1;color:#7a7a7a;cursor:pointer;padding:4px 8px}"
+    "#mdv-help-close:hover{color:#111}body.dark #mdv-help-close{color:#bbb}body.dark #mdv-help-close:hover{color:#fff}"
     "#mdv-help h3{margin:0 0 16px;color:#1a1a1a;font-size:20px;font-weight:700;"
     "padding-bottom:12px;border-bottom:1px solid #ddd}"
     "body.dark #mdv-help h3{color:#e0e0e0;border-bottom-color:#444}"
@@ -1562,6 +2040,11 @@ static void build_js(StrBuf* sb) {
     /* Toast */
     "function toast(m){var t=document.getElementById('mdv-toast');t.innerText=m;t.className='on';"
     "if(tt)clearTimeout(tt);tt=setTimeout(function(){t.className=''},1500)}"
+    "function mdvScrollY(){var de=document.documentElement,b=document.body;return (window.pageYOffset||((de&&de.scrollTop)||0)||((b&&b.scrollTop)||0));}"
+    "function mdvSetScrollY(y){if(y<0)y=0;window.scrollTo(0,y)}"
+    "function mdvScrollElToTop(el,pad){var st;if(!el)return;pad=(pad||0);st=mdvScrollY();window.scrollTo(0,el.getBoundingClientRect().top+st-pad)}"
+    "function usv(){var s=document.getElementById('mdv-status');if(!s)return;"
+    "s.innerText='Zoom '+Math.round((fs*100)/19)+'%'+(ln?' | Line #':'');}"
 
     /* Char count */
     "function rcc(){var ct=document.getElementById('mdv-ct'),out=[],walker,n,pv;"
@@ -1597,7 +2080,7 @@ static void build_js(StrBuf* sb) {
     "function mmBodyFontPx(){var cs=window.getComputedStyle?window.getComputedStyle(document.body,null):null;"
     "var fz=cs&&cs.fontSize?parseFloat(cs.fontSize):parseFloat(document.body.style.fontSize);"
     "if(!(fz>0))fz=16;return fz;}"
-    "function af(){document.body.style.fontSize=fs+'px';syncMermaidTypography();toast('Font: '+fs+'px')}"
+    "function af(){document.body.style.fontSize=fs+'px';syncMermaidTypography();usv();toast('Font: '+fs+'px')}"
 
     /* Theme toggle */
     "function td(){var b=document.body,h=document.documentElement;"
@@ -1608,12 +2091,12 @@ static void build_js(StrBuf* sb) {
 
     /* Column width */
     "function cw(){if(mw===0)mw=800;mw=Math.min(mw+80,9999);aw()}"
-    "function cn(){if(mw===0)return;mw=mw-80;if(mw<400){mw=0;document.getElementById('mdv-ct').style.maxWidth='none';syncMermaidTypography();toast('Width: full');return;}aw()}"
-    "function aw(){document.getElementById('mdv-ct').style.maxWidth=mw+'px';syncMermaidTypography();toast('Width: '+mw+'px')}"
+    "function cn(){if(mw===0)return;mw=mw-80;if(mw<400){mw=0;document.getElementById('mdv-ct').style.maxWidth='none';syncMermaidTypography();usv();toast('Width: full');return;}aw()}"
+    "function aw(){document.getElementById('mdv-ct').style.maxWidth=mw+'px';syncMermaidTypography();usv();toast('Width: '+mw+'px')}"
 
     /* Line numbers toggle */
     "function tl(){"
-    "ln=ln?0:1;var ps=document.querySelectorAll('pre');"
+    "var y=mdvScrollY();ln=ln?0:1;var ps=document.querySelectorAll('pre');"
     "for(var i=0;i<ps.length;i++){"
     "var p=ps[i];"
     "if(ln&&!p._lnDone){"
@@ -1637,7 +2120,7 @@ static void build_js(StrBuf* sb) {
     "  if(code2){code2.innerHTML=cd2.innerHTML;}}"
     "  p.className=p.className.replace(/\\bln\\b/g,'').replace(/^\\s+|\\s+$/g,'');p._lnDone=0;"
     "}}"
-    "toast(ln?'Line numbers ON':'Line numbers OFF')}"
+    "mdvSetScrollY(y);usv();toast(ln?'Line numbers ON':'Line numbers OFF')}"
 
     /* TOC */
     "function btoc(){var toc=document.getElementById('mdv-toc');"
@@ -1645,11 +2128,11 @@ static void build_js(StrBuf* sb) {
     "var old=toc.querySelectorAll('.ti');for(var i=0;i<old.length;i++)old[i].parentNode.removeChild(old[i]);"
     "for(var i=0;i<hs.length;i++){var h=hs[i],a=document.createElement('a');"
     "a.className='ti t'+h.tagName.charAt(1);a.innerText=h.innerText;a.href='#'+h.id;"
-    "a.onclick=(function(id){return function(e){e.preventDefault?e.preventDefault():e.returnValue=false;var el=document.getElementById(id);if(el)el.scrollIntoView()}})(h.id);"
+    "a.onclick=(function(id){return function(e){e.preventDefault?e.preventDefault():e.returnValue=false;var el=document.getElementById(id);if(el)mdvScrollElToTop(el,12)}})(h.id);"
     "toc.appendChild(a)}initLinkTooltips()}"
     "function ttoc(){var toc=document.getElementById('mdv-toc');"
     "if(toc.className.indexOf('on')>=0){toc.className='';document.body.style.marginRight='0'}"
-    "else{btoc();toc.className='on';document.body.style.marginRight='280px'}}"
+    "else{btoc();toc.className='on';document.body.style.marginRight='280px'}usv()}"
 
     /* Link tooltip preview */
     "function mdvLinkTitleText(a){var href,raw;if(!a)return '';"
@@ -1658,10 +2141,23 @@ static void build_js(StrBuf* sb) {
     "if(raw.charAt&&raw.charAt(0)==='#')return raw;"
     "href=a.href||raw;"
     "return href||'';}"
+    "function mdvHandleLinkClick(e){"
+    "e=e||window.event;var t=e.target||e.srcElement,raw,href,id,el;"
+    "while(t&&t.tagName!=='A')t=t.parentNode;"
+    "if(!t)return true;"
+    "raw=t.getAttribute?t.getAttribute('href'):null;href=raw||t.href||'';"
+    "if(!href)return true;"
+    "if(href.charAt(0)==='#'){"
+    "id=href.substring(1);el=document.getElementById(id);"
+    "if(el){if(e.preventDefault)e.preventDefault();else e.returnValue=false;mdvScrollElToTop(el,12);return false;}"
+    "return true;}"
+    "if(e.preventDefault)e.preventDefault();else e.returnValue=false;"
+    "document.title='MDVLINK:'+encodeURIComponent(href);"
+    "return false;}"
     "function initLinkTooltips(){var as=document.getElementsByTagName('a'),i,a,t;"
     "for(i=0;i<as.length;i++){a=as[i];t=mdvLinkTitleText(a);if(!t)continue;"
     "if(typeof a._mdvOrigTitle==='undefined')a._mdvOrigTitle=a.getAttribute('title');"
-    "a.title=t;}}"
+    "a.title=t;a.onclick=mdvHandleLinkClick;}}"
 
     /* Find */
     "var fm=[],fi=-1;"
@@ -1671,7 +2167,7 @@ static void build_js(StrBuf* sb) {
     "ch=n.childNodes;if(!ch)continue;for(i=ch.length-1;i>=0;i--)stack.push(ch[i]);}"
     "return{_nodes:nodes,_idx:-1,currentNode:null,nextNode:function(){this._idx++;if(this._idx>=this._nodes.length)return false;this.currentNode=this._nodes[this._idx];return true;}}}"
     "function cf(){var ms=document.querySelectorAll('.hl');for(var i=0;i<ms.length;i++){"
-    "var m=ms[i],p=m.parentNode;p.replaceChild(document.createTextNode(m.innerText),m);p.normalize()}"
+    "var m=ms[i],p=m.parentNode;p.replaceChild(document.createTextNode(m.textContent||m.innerText||''),m);p.normalize()}"
     "fm=[];fi=-1;document.getElementById('mdv-fc').innerText=''}"
 
     "function df(txt,mc,ww){cf();if(!txt)return;mc=mc?1:0;ww=ww?1:0;"
@@ -1720,8 +2216,7 @@ static void build_js(StrBuf* sb) {
     "  var fb=document.getElementById('mdv-fb');"
     "  var off=(fb&&fb.className.indexOf('on')>=0)?fb.offsetHeight+10:20;"
     "  if(rect.top<off||rect.bottom>window.innerHeight){"
-    "    var st=window.pageYOffset||document.documentElement.scrollTop;"
-    "    window.scrollTo(0,rect.top+st-off);"
+    "    mdvScrollElToTop(el,off);"
     "  }"
     "}"
     "var c=document.getElementById('mdv-fc');"
@@ -1733,6 +2228,11 @@ static void build_js(StrBuf* sb) {
     "function sf(){var b=document.getElementById('mdv-fb');b.className='on';"
     "var inp=document.getElementById('mdv-fi');inp.focus();inp.select()}"
     "function hf(){document.getElementById('mdv-fb').className='';cf()}"
+    "function qf(force){var inp=document.getElementById('mdv-fi'),v;if(!inp)return;v=inp.value||'';"
+    "if(!force&&v.length<2){cf();document.getElementById('mdv-fc').innerText=v?'Type 2+ chars':'';return;}"
+    "df(v,0,0)}"
+    "function hkf(back){var inp=document.getElementById('mdv-fi'),v=inp?(inp.value||''):'';"
+    "if(!v){sf();return false;}if(!fm||fm.length===0){qf(1);if(!fm||fm.length===0)return false;}if(back)fp();else fn();return false}"
 
     /* Help */
     "function th(){var h=document.getElementById('mdv-help');h.className=h.className==='on'?'':'on'}"
@@ -1787,6 +2287,8 @@ static void build_js(StrBuf* sb) {
     "kws='\\\\b(SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TABLE|INDEX|JOIN|LEFT|RIGHT|INNER|OUTER|ON|AND|OR|NOT|IN|IS|NULL|AS|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|UNION|ALL|DISTINCT|INTO|VALUES|SET|BEGIN|COMMIT|ROLLBACK|EXISTS|BETWEEN|LIKE|COUNT|SUM|AVG|MAX|MIN|select|from|where|insert|update|delete|create|drop|alter|table|join|left|right|inner|outer|on|and|or|not|in|is|null|as|order|by|group|having|limit)\\\\b';"
     "else if(lang==='bash'||lang==='sh'||lang==='shell'||lang==='zsh')"
     "kws='\\\\b(if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|local|export|source|echo|exit|cd|ls|grep|sed|awk|cat|rm|mkdir|cp|mv|chmod|chown|sudo|apt|yum|pip|npm)\\\\b';"
+    "else if(lang==='yaml'||lang==='yml')"
+    "kws='\\\\b(true|false|null|yes|no|on|off)\\\\b';"
     "else if(lang==='css'||lang==='scss'||lang==='less')"
     "kws='\\\\b(color|background|margin|padding|border|font|display|position|width|height|top|left|right|bottom|flex|grid|none|block|inline|relative|absolute|fixed|inherit|auto|important|solid|transparent)\\\\b';"
     "else if(lang==='php')"
@@ -2027,6 +2529,12 @@ static void build_js(StrBuf* sb) {
     "function pd(e){if(e.preventDefault)e.preventDefault();else e.returnValue=false}"
     "document.onkeydown=function(e){"
     "e=e||window.event;var c=e.ctrlKey||e.metaKey,k=e.keyCode;"
+    "var inp=document.getElementById('mdv-fi'),ae=document.activeElement,inFind=(inp&&ae===inp);"
+    "if(inFind){"
+    "if(k===27){pd(e);hf();return false}"
+    "if(k===13){pd(e);qf(1);if(e.shiftKey)fp();else fn();return false}"
+    "if(k===114){pd(e);sf();return false}"
+    "return true}"
     "if(c&&(k===187||k===107)){pd(e);zi();return false}"
     "if(c&&(k===189||k===109)){pd(e);zo();return false}"
     "if(c&&(k===48||k===96)){pd(e);zr();return false}"
@@ -2038,10 +2546,10 @@ static void build_js(StrBuf* sb) {
     "if(c&&k===76){pd(e);tl();return false}"
     "if(c&&k===87){pd(e);if(e.shiftKey)cn();else cw();return false}"
     "if(k===112||(c&&k===191)){pd(e);th();return false}"
+    "if(k===118){pd(e);sf();return false}"
+    "if(k===114){pd(e);return hkf(e.shiftKey?1:0)}"
     "if(k===27){hf();document.getElementById('mdv-toc').className='';document.body.style.marginRight='0';"
     "document.getElementById('mdv-help').className='';return false}"
-    "if(k===13&&document.activeElement===document.getElementById('mdv-fi')){"
-    "pd(e);if(e.shiftKey)fp();else fn();return false}"
     "};"
 
     /* Init */
@@ -2049,12 +2557,14 @@ static void build_js(StrBuf* sb) {
     "window.onload=function(){"
     "var inp=document.getElementById('mdv-fi');if(inp){"
     "var trig=function(){var s=inp;if(s._db)clearTimeout(s._db);"
-    "s._db=setTimeout(function(){df(s.value,0,0)},200)};"
-    "inp.onkeyup=trig;"
+    "s._db=setTimeout(function(){qf(0)},250)};"
     "inp.oninput=trig;"
+    "inp.onpaste=trig;"
+    "inp.oncut=trig;"
     "}"
     "initMermaid();shAll();initCollapse();initLinkTooltips();"
     "if(ln)tl();"  /* apply line numbers if saved */
+    "usv();"
     "ucc();"
     "up()};"
     "</script>");
@@ -2073,9 +2583,11 @@ static const char* get_ui(void) {
     "<button class=\"fb\" onclick=\"hf()\">&times;</button>"
     "</div>"
     "<div id=\"mdv-char\"></div>"
+    "<div id=\"mdv-status\"></div>"
     "<div id=\"mdv-toc\"><div id=\"mdv-toc-t\">Table of Contents</div></div>"
     "<div id=\"mdv-toast\"></div>"
     "<div id=\"mdv-help\">"
+    "<button id=\"mdv-help-close\" onclick=\"th()\" aria-label=\"Close\">&times;</button>"
     "<h3>MDView Keyboard Shortcuts</h3>"
 
     "<div class=\"hrow\"><span>Copy to Clipboard</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">C</span></span></div>"
@@ -2266,6 +2778,82 @@ static void save_current_settings(IWebBrowser2* pB) {
     }
 }
 
+static int load_file_into_existing_view(MDViewData* d, const char* fileUtf8) {
+    char* md;
+    char* body;
+    char* full;
+    StrBuf cssBuf;
+    StrBuf jsBuf;
+    const char* ui;
+    size_t fl;
+    int dark;
+
+    if (!d || !d->pBrowser || !fileUtf8) return LISTPLUGIN_ERROR;
+
+    md = read_file_utf8(fileUtf8);
+    if (!md) return LISTPLUGIN_ERROR;
+    body = md_to_html(md, fileUtf8);
+    if (!body) {
+        free(md);
+        return LISTPLUGIN_ERROR;
+    }
+
+    sb_init(&cssBuf);
+    sb_init(&jsBuf);
+    if (!cssBuf.data || !jsBuf.data) {
+        free(md);
+        free(body);
+        if (cssBuf.data) free(cssBuf.data);
+        if (jsBuf.data) free(jsBuf.data);
+        return LISTPLUGIN_ERROR;
+    }
+
+    dark = (g_settings.isDark >= 0) ? g_settings.isDark : is_dark_theme();
+    build_css(&cssBuf);
+    build_js(&jsBuf);
+    ui = get_ui();
+
+    fl = strlen(body) + cssBuf.len + jsBuf.len + strlen(ui) + 1024;
+    full = (char*)malloc(fl);
+    if (!full) {
+        free(md);
+        free(body);
+        free(cssBuf.data);
+        free(jsBuf.data);
+        return LISTPLUGIN_ERROR;
+    }
+
+    snprintf(full, fl,
+        "<!DOCTYPE html><html%s><head>"
+        "<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">"
+        "<meta charset=\"utf-8\"><style>%s</style></head><body%s>"
+        "%s<div id=\"mdv-ct\">%s</div>%s</body></html>",
+        dark ? " style=\"background:#1e1e1e\"" : "", cssBuf.data, dark ? " class=\"dark\"" : "", ui, body, jsBuf.data);
+
+    navigate_to_html(d->pBrowser, full);
+
+    free(full);
+    free(body);
+    free(cssBuf.data);
+    free(jsBuf.data);
+    if (d->mdUtf8) free(d->mdUtf8);
+    d->mdUtf8 = md;
+    d->rawCharCount = utf8_char_count(md);
+    if (d->currentFile) free(d->currentFile);
+    d->currentFile = mdview_strdup(fileUtf8);
+
+    if (d->hwndText) {
+        wchar_t* w = utf8_to_wide_dup(d->mdUtf8);
+        if (w) {
+            SetWindowTextW(d->hwndText, w);
+            free(w);
+        }
+    }
+    set_raw_count_label(d->hwndTextCount, d->rawCharCount);
+    if (d->splitView && d->hwndText) sync_html_to_edit(d);
+    return LISTPLUGIN_OK;
+}
+
 static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM lP) {
     MDViewData* d=(MDViewData*)mdview_get_window_ptr(hwnd, GWLP_USERDATA);
     switch(msg){
@@ -2280,8 +2868,20 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
             else if (d->hwndText) SetFocus(d->hwndText);
         }
         return 0;
+    case WM_TIMER:
+        if (d && wP == MDVIEW_SYNC_TIMER_ID && d->splitView && d->hwndText && d->pBrowser) {
+            handle_pending_link_command(d);
+            sync_html_to_edit(d);
+            return 0;
+        }
+        if (d && wP == MDVIEW_SYNC_TIMER_ID && d->pBrowser) {
+            handle_pending_link_command(d);
+            return 0;
+        }
+        break;
     case WM_DESTROY:
         if(d){
+            KillTimer(hwnd, MDVIEW_SYNC_TIMER_ID);
             /* Save settings to INI before closing */
             save_current_settings(d->pBrowser);
             if(d->hwndIEServer && d->origIEProc){
@@ -2299,6 +2899,7 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
             }
             d->hTextFont = NULL;
             if (d->mdUtf8) { free(d->mdUtf8); d->mdUtf8 = NULL; }
+            if (d->currentFile) { free(d->currentFile); d->currentFile = NULL; }
             if(d->pBrowser) IWebBrowser2_Release(d->pBrowser);
             if(d->pOleObj){ IOleObject_Close(d->pOleObj,OLECLOSE_NOSAVE); IOleObject_Release(d->pOleObj); }
     free(d); mdview_set_window_ptr(hwnd, GWLP_USERDATA, 0);
@@ -2344,7 +2945,7 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
     }
 
     char* md=read_file_utf8(file); if(!md)return NULL;
-    char* body=md_to_html(md);
+    char* body=md_to_html(md, file);
     if(!body){
         free(md);
         return NULL;
@@ -2391,12 +2992,14 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
     data->hwndContainer = hwnd;
     data->rawCharCount = utf8_char_count(md);
     data->mdUtf8 = md;
+    data->currentFile = mdview_strdup(file);
     mdview_set_window_ptr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
 
     SiteImpl* site=NULL;
     HRESULT hr=create_browser(hwnd,&data->pBrowser,&data->pOleObj,&site);
     if(FAILED(hr)){
         if (data->mdUtf8) free(data->mdUtf8);
+        if (data->currentFile) free(data->currentFile);
         free(data);
         free(full);
         DestroyWindow(hwnd);
@@ -2421,6 +3024,7 @@ __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
             SetFocus(ieWnd);
         }
     }
+    SetTimer(hwnd, MDVIEW_SYNC_TIMER_ID, MDVIEW_SYNC_TIMER_MS, NULL);
 
     return hwnd;
 }
@@ -2445,6 +3049,32 @@ __declspec(dllexport) HWND __stdcall ListLoadW(HWND pw, WCHAR* file, int flags) 
 }
 
 __declspec(dllexport) void __stdcall ListCloseWindow(HWND w) { DestroyWindow(w); }
+
+__declspec(dllexport) int __stdcall ListLoadNext(HWND pw, HWND lw, char* file, int flags) {
+    MDViewData* d = (MDViewData*)mdview_get_window_ptr(lw, GWLP_USERDATA);
+    (void)pw;
+    (void)flags;
+    if (!d || !file) return LISTPLUGIN_ERROR;
+    return load_file_into_existing_view(d, file);
+}
+
+__declspec(dllexport) int __stdcall ListLoadNextW(HWND pw, HWND lw, WCHAR* file, int flags) {
+    int len;
+    char* u;
+    int rc;
+    if (!file) return LISTPLUGIN_ERROR;
+    len = WideCharToMultiByte(CP_UTF8, 0, file, -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return LISTPLUGIN_ERROR;
+    u = (char*)malloc((size_t)len);
+    if (!u) return LISTPLUGIN_ERROR;
+    if (WideCharToMultiByte(CP_UTF8, 0, file, -1, u, len, NULL, NULL) <= 0) {
+        free(u);
+        return LISTPLUGIN_ERROR;
+    }
+    rc = ListLoadNext(pw, lw, u, flags);
+    free(u);
+    return rc;
+}
 
 __declspec(dllexport) void __stdcall ListGetDetectString(char* ds, int mx) {
     strncpy_s(ds, (size_t)mx, "EXT=\"MD\" | EXT=\"MARKDOWN\" | EXT=\"MKD\" | EXT=\"MKDN\"", _TRUNCATE);

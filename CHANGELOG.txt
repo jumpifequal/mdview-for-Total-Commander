@@ -36,7 +36,7 @@ v 2.5
 - fix: sequenceDiagram parsing now handles arrow operators such as -->> correctly without creating malformed participant names
 - fix: sequenceDiagram note boxes now wrap long text correctly and keep note text inside the note rectangle
 - fix: classDiagram relation parsing now recognises operators containing >
-- fix: classDiagram routing avoids passing inter-row relations through class boxes and reduces label collisions in dense layouts
+- fixclassDiagram routing avoids passing int-row relations through class boxes and reduces label collisions in dense layouts
 - fix: stateDiagram parsing now handles pseudo-states correctly and renders simple vertical flows with direct state-to-state arrows
 
 v 2.6
@@ -55,3 +55,21 @@ v 2.8
 
 v 3.0
 - add: char with spaces count
+
+v3.1
+- add: Respect Total Commander interaction patterns where applicable. Keys 1..9, N, and P must work according to the concept adopted in Total Commander. F3 and F7 behave like CTRL-F
+- fix: no temporary html files are created now, all is in memory
+- add: support for mixed html, md files with html tags
+- add: scale is now visible
+- fix: modal dialog fox low-rew screen is not entirely visible
+- fix: scrolling is jerky and cannot be controlled line-by-line, also in split view
+- fix: TOC is useful but link positioning is incorrect.
+- fix: Line Numbers is toggleable, but the UI/state handling is wrong.
+- fix: Split Source View is useful in theory but currently not synchronized.
+- fix: The searchable input field does not properly support paste from clipboard.
+- add: Rendering scale can be changed, which is useful.
+
+v3.2
+- fix: relative Markdown links now resolve against the current document path, including ./, ../, nested paths, images, and file fragments
+- fix: clicking a local Markdown link no longer blanks the embedded browser; linked Markdown files now open inside MDView and non-Markdown links are opened by Windows
+- fix: YAML front matter at the top of SKILL-style documents now renders as a highlighted YAML block instead of flattened prose
