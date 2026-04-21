@@ -56,12 +56,12 @@ v 2.8
 v 3.0
 - add: char with spaces count
 
-v3.1 (internal)
+v3.1
 - add: Respect Total Commander interaction patterns where applicable. Keys 1..9, N, and P must work according to the concept adopted in Total Commander. F3 and F7 behave like CTRL-F
 - fix: no temporary html files are created now, all is in memory
 - add: support for mixed html, md files with html tags
 - add: scale is now visible
-- fix: modal dialog for low-res screen is not entirely visible
+- fix: modal dialog fox low-rew screen is not entirely visible
 - fix: scrolling is jerky and cannot be controlled line-by-line, also in split view
 - fix: TOC is useful but link positioning is incorrect.
 - fix: Line Numbers is toggleable, but the UI/state handling is wrong.
@@ -73,3 +73,13 @@ v3.2
 - fix: relative Markdown links now resolve against the current document path, including ./, ../, nested paths, images, and file fragments
 - fix: clicking a local Markdown link no longer blanks the embedded browser; linked Markdown files now open inside MDView and non-Markdown links are opened by Windows
 - fix: YAML front matter at the top of SKILL-style documents now renders as a highlighted YAML block instead of flattened prose
+
+v3.3
+- fix: Total Commander menu and lister commands are now routed consistently through WLX callbacks for Copy, Select all, Print, and lister scroll-percent updates
+- fix: Windows XP search reliability is improved by avoiding modern selector assumptions in the embedded MSHTML engine
+- add: `==highlight==` inline rendering
+- add: curated support for common emoji shortcodes such as `:smile:`, `:heart:`, `:+1:`, `:rocket:`, and other frequently used aliases
+- add: block-level `<details>` / `<summary>` passthrough for collapsible sections
+- fix: older MSHTML engines now get a script fallback for `<details>` so summary rows remain clickable when native HTML5 support is missing
+- docs: README shortcut list and on-screen help are aligned with the implemented search keys (`F3` / `Shift+F3` / `F7`)
+- docs: README and changelog now document supported Markdown extensions and current limitations, including partial Mermaid scope, missing math rendering, and limited reference-style embedded image support

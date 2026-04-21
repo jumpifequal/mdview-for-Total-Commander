@@ -9,3 +9,4 @@ EXPORTS
     ListSearchTextW @8
     ListLoadNext @9
     ListLoadNextW @10
+    ListPrint @11

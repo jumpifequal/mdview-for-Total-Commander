@@ -1211,6 +1211,17 @@ static int html_table_delta(const char* s) {
     return delta;
 }
 
+static int html_details_delta(const char* s) {
+    int delta = 0;
+    const char* p = s;
+    while ((p = strchr(p, '<')) != NULL) {
+        if (_strnicmp(p, "<details", 8) == 0) delta++;
+        else if (_strnicmp(p, "</details", 9) == 0) delta--;
+        p++;
+    }
+    return delta;
+}
+
 static int is_mermaid_lang(const char* lang) {
     if (!lang) return 0;
     while (*lang == ' ' || *lang == '\t') lang++;
@@ -1416,6 +1427,78 @@ done:
     return result;
 }
 
+typedef struct {
+    const char* shortcode;
+    const char* utf8;
+} EmojiMap;
+
+static const char* lookup_emoji_shortcode(const char* shortcode, size_t len) {
+    static const EmojiMap kEmojiMap[] = {
+        { "+1",       "\xF0\x9F\x91\x8D" },
+        { "-1",       "\xF0\x9F\x91\x8E" },
+        { "grinning", "\xF0\x9F\x98\x80" },
+        { "smile",    "\xF0\x9F\x98\x84" },
+        { "smiley",   "\xF0\x9F\x98\x83" },
+        { "laughing", "\xF0\x9F\x98\x86" },
+        { "wink",     "\xF0\x9F\x98\x89" },
+        { "blush",    "\xF0\x9F\x98\x8A" },
+        { "heart_eyes","\xF0\x9F\x98\x8D" },
+        { "thinking", "\xF0\x9F\xA4\x94" },
+        { "cry",      "\xF0\x9F\x98\xA2" },
+        { "sob",      "\xF0\x9F\x98\xAD" },
+        { "angry",    "\xF0\x9F\x98\xA0" },
+        { "sunglasses","\xF0\x9F\x98\x8E" },
+        { "partying_face","\xF0\x9F\xA5\xB3" },
+        { "heart",    "\xE2\x9D\xA4\xEF\xB8\x8F" },
+        { "yellow_heart","\xF0\x9F\x92\x9B" },
+        { "green_heart","\xF0\x9F\x92\x9A" },
+        { "blue_heart","\xF0\x9F\x92\x99" },
+        { "purple_heart","\xF0\x9F\x92\x9C" },
+        { "broken_heart","\xF0\x9F\x92\x94" },
+        { "fire",     "\xF0\x9F\x94\xA5" },
+        { "star",     "\xE2\xAD\x90" },
+        { "sparkles", "\xE2\x9C\xA8" },
+        { "boom",     "\xF0\x9F\x92\xA5" },
+        { "warning",  "\xE2\x9A\xA0\xEF\xB8\x8F" },
+        { "white_check_mark","\xE2\x9C\x85" },
+        { "x",        "\xE2\x9D\x8C" },
+        { "thumbsup", "\xF0\x9F\x91\x8D" },
+        { "thumbsdown","\xF0\x9F\x91\x8E" },
+        { "clap",     "\xF0\x9F\x91\x8F" },
+        { "wave",     "\xF0\x9F\x91\x8B" },
+        { "pray",     "\xF0\x9F\x99\x8F" },
+        { "rocket",   "\xF0\x9F\x9A\x80" },
+        { "tada",     "\xF0\x9F\x8E\x89" },
+        { "bulb",     "\xF0\x9F\x92\xA1" },
+        { "zap",      "\xE2\x9A\xA1" },
+        { "bug",      "\xF0\x9F\x90\x9B" },
+        { "memo",     "\xF0\x9F\x93\x9D" },
+        { "book",     "\xF0\x9F\x93\x96" },
+        { "computer", "\xF0\x9F\x92\xBB" },
+        { "desktop_computer", "\xF0\x9F\x96\xA5\xEF\xB8\x8F" },
+        { "iphone",   "\xF0\x9F\x93\xB1" },
+        { "coffee",   "\xE2\x98\x95" },
+        { "muscle",   "\xF0\x9F\x92\xAA" },
+        { "eyes",     "\xF0\x9F\x91\x80" },
+        { "mag",      "\xF0\x9F\x94\x8D" },
+        { "lock",     "\xF0\x9F\x94\x92" },
+        { "key",      "\xF0\x9F\x94\x91" },
+        { "link",     "\xF0\x9F\x94\x97" },
+        { "pushpin",  "\xF0\x9F\x93\x8C" },
+        { "hourglass", "\xE2\x8C\x9B" },
+        { "calendar", "\xF0\x9F\x93\x85" },
+        { "checkered_flag", "\xF0\x9F\x8F\x81" }
+    };
+    size_t i;
+    for (i = 0; i < sizeof(kEmojiMap) / sizeof(kEmojiMap[0]); ++i) {
+        if (strlen(kEmojiMap[i].shortcode) == len &&
+            _strnicmp(kEmojiMap[i].shortcode, shortcode, len) == 0) {
+            return kEmojiMap[i].utf8;
+        }
+    }
+    return NULL;
+}
+
 /* ── Markdown Inline Parser ──────────────────────────────────────────── */
 
 static void parse_inline(StrBuf* sb, const char* t, size_t len, const char* currentFile) {
@@ -1504,6 +1587,11 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len, const char* curr
             size_t s2=i+2,e2=s2; while(e2+1<len&&!(t[e2]=='~'&&t[e2+1]=='~'))e2++;
             if(e2+1<len){ sb_append(sb,"<del>"); parse_inline(sb,t+s2,e2-s2,currentFile); sb_append(sb,"</del>"); i=e2+2; continue; }
         }
+        /* Highlight ==text== */
+        if (t[i]=='='&&i+1<len&&t[i+1]=='=') {
+            size_t s2=i+2,e2=s2; while(e2+1<len&&!(t[e2]=='='&&t[e2+1]=='='))e2++;
+            if(e2+1<len&&e2>s2){ sb_append(sb,"<mark>"); parse_inline(sb,t+s2,e2-s2,currentFile); sb_append(sb,"</mark>"); i=e2+2; continue; }
+        }
         /* Bold+Italic ***text*** */
         if ((t[i]=='*'||t[i]=='_')&&i+2<len&&t[i+1]==t[i]&&t[i+2]==t[i]) {
             char m=t[i]; size_t s3=i+3,e3=s3;
@@ -1526,6 +1614,27 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len, const char* curr
             size_t us=i; while(i<len&&t[i]!=' '&&t[i]!='\n'&&t[i]!='\r'&&t[i]!=')'&&t[i]!='>'&&t[i]!='"')i++;
             while(i>us&&(t[i-1]=='.'||t[i-1]==','||t[i-1]==';'))i--;
             sb_append(sb,"<a href=\""); sb_append_esc(sb,t+us,i-us); sb_append(sb,"\">"); sb_append_esc(sb,t+us,i-us); sb_append(sb,"</a>"); continue;
+        }
+        /* Limited emoji shortcodes like :smile: */
+        if (t[i] == ':') {
+            size_t j = i + 1;
+            while (j < len &&
+                   ((t[j] >= 'a' && t[j] <= 'z') ||
+                    (t[j] >= 'A' && t[j] <= 'Z') ||
+                    (t[j] >= '0' && t[j] <= '9') ||
+                    t[j] == '_' || t[j] == '+' || t[j] == '-')) {
+                ++j;
+            }
+            if (j > i + 1 && j < len && t[j] == ':') {
+                const char* emoji = lookup_emoji_shortcode(t + i + 1, j - (i + 1));
+                if (emoji) {
+                    sb_append(sb, "<span class=\"mdv-emoji\">");
+                    sb_append(sb, emoji);
+                    sb_append(sb, "</span>");
+                    i = j + 1;
+                    continue;
+                }
+            }
         }
         /* Plain char */
         sb_append_esc(sb,&t[i],1); i++;
@@ -1732,6 +1841,20 @@ static char* md_to_html(const char* markdown, const char* currentFile) {
             continue;
         }
 
+        /* Raw HTML details block passthrough */
+        if (_strnicmp(tr, "<details", 8) == 0) {
+            int depth = 0;
+            while (i < lines.count) {
+                const char* raw = lines.lines[i];
+                depth += html_details_delta(raw);
+                sb_append(&sb, raw);
+                sb_append(&sb, "\n");
+                i++;
+                if (depth <= 0) break;
+            }
+            continue;
+        }
+
         /* Table */
         if (i+1<lines.count && is_table_sep(lines.lines[i+1])) {
             char cells[64][1024]; char al[64]; memset(al,'l',sizeof(al));
@@ -1790,6 +1913,7 @@ static char* md_to_html(const char* markdown, const char* currentFile) {
                 if(pt[0]=='\0')break; if(pt[0]=='#'&&pt[1]==' ')break; if(is_hr(pl))break;
                 if(pt[0]=='>'&&(pt[1]==' '||pt[1]=='\0'))break;
                 if(strncmp(pt,"```",3)==0||strncmp(pt,"~~~",3)==0)break;
+                if(_strnicmp(pt,"<details",8)==0)break;
                 if(is_ul(pt)||is_ol(pt))break;
                 if(i+1<lines.count&&is_table_sep(lines.lines[i+1]))break;
                 if(para.len>0) sb_append(&para,"\n");
@@ -1893,6 +2017,12 @@ static void build_css(StrBuf* sb) {
     "body.dark tr:nth-child(even){background:#252526}"
     "hr{border:none;border-top:1px solid #e1e4e8;margin:1.5em 0}"
     "body.dark hr{border-top-color:#444}"
+    "mark{background:#fff59d;color:#24292e;padding:0 .18em;border-radius:3px}"
+    "body.dark mark{background:#7a5d00;color:#fff7cc}"
+    ".mdv-emoji{font-family:'Segoe UI Emoji','Apple Color Emoji','Noto Color Emoji',sans-serif}"
+    "details{display:block;margin:.9em 0;padding:.1em 0}"
+    "summary{cursor:pointer;font-weight:600;outline:none}"
+    "summary:hover{color:#0366d6}body.dark summary:hover{color:#569cd6}"
     "img{max-width:100%;border-radius:4px}"
     "ul,ol{padding-left:2em}li{margin:.3em 0}"
     "input[type=checkbox]{margin-right:6px}"
@@ -2065,6 +2195,23 @@ static void build_js(StrBuf* sb) {
     "function zi(){fs=Math.min(fs+1,30);af()}"
     "function zo(){fs=Math.max(fs-1,9);af()}"
     "function zr(){fs=19;af()}"
+    "function mdvToArray(nl){var a=[],i;if(!nl)return a;for(i=0;i<nl.length;i++)a.push(nl[i]);return a}"
+    "function mdvHasClass(el,cls){var cn;if(!el||!cls)return false;cn=' '+(el.className||'')+' ';return cn.indexOf(' '+cls+' ')>=0}"
+    "function mdvByClass(root,cls,tag){var out=[],els,i;root=root||document;els=root.getElementsByTagName(tag||'*');"
+    "for(i=0;i<els.length;i++)if(mdvHasClass(els[i],cls))out.push(els[i]);return out}"
+    "function mdvQSA(root,sel){var out=[],i,j,nodes,blocks,svgs;root=root||document;"
+    "if(root.querySelectorAll){try{return root.querySelectorAll(sel)}catch(ex){}}"
+    "if(sel==='.hl')return mdvByClass(root,'hl');"
+    "if(sel==='.ti')return mdvByClass(root,'ti');"
+    "if(sel==='.ln-code')return mdvByClass(root,'ln-code');"
+    "if(sel==='pre')return root.getElementsByTagName('pre');"
+    "if(sel==='pre,blockquote'){nodes=mdvToArray(root.getElementsByTagName('pre'));blocks=root.getElementsByTagName('blockquote');for(i=0;i<blocks.length;i++)nodes.push(blocks[i]);return nodes;}"
+    "if(sel==='pre code[class]'){nodes=[];blocks=root.getElementsByTagName('pre');for(i=0;i<blocks.length;i++){var codes=blocks[i].getElementsByTagName('code');for(j=0;j<codes.length;j++)if(codes[j].className)nodes.push(codes[j]);}return nodes;}"
+    "if(sel==='h1[id],h2[id],h3[id],h4[id]'){nodes=[];for(j=1;j<=4;j++){var hs=root.getElementsByTagName('h'+j);for(i=0;i<hs.length;i++)if(hs[i].getAttribute('id'))nodes.push(hs[i]);}return nodes;}"
+    "if(sel==='.mdv-mermaid[data-mdv-mermaid]'){nodes=mdvByClass(root,'mdv-mermaid');out=[];for(i=0;i<nodes.length;i++)if(nodes[i].getAttribute&&nodes[i].getAttribute('data-mdv-mermaid')!==null)out.push(nodes[i]);return out;}"
+    "if(sel==='.mdv-mermaid svg'){nodes=mdvByClass(root,'mdv-mermaid');out=[];for(i=0;i<nodes.length;i++){svgs=nodes[i].getElementsByTagName('svg');for(j=0;j<svgs.length;j++)out.push(svgs[j]);}return out;}"
+    "return out}"
+    "function mdvQS(root,sel){var list=mdvQSA(root,sel);return(list&&list.length)?list[0]:null}"
     "function fitMermaidSvg(svg){var vb,parts,baseW,baseH,view,availW,targetW,targetH;"
     "if(!svg)return;vb=svg.getAttribute('viewBox');if(!vb)return;parts=vb.split(/\\s+/);if(parts.length!==4)return;"
     "baseW=parseFloat(parts[2]);baseH=parseFloat(parts[3]);if(!(baseW>0)||!(baseH>0))return;"
@@ -2072,7 +2219,7 @@ static void build_js(StrBuf* sb) {
     "if(!(availW>0)){if(window.setTimeout&&!svg.getAttribute('data-mdv-fit-pending')){svg.setAttribute('data-mdv-fit-pending','1');window.setTimeout(function(){try{svg.removeAttribute('data-mdv-fit-pending');fitMermaidSvg(svg);}catch(ex){}},0);}return;}"
     "availW=Math.max(220,availW-4);targetW=Math.min(availW,baseW);targetH=Math.max(80,Math.round(baseH*(targetW/baseW)));"
     "svg.style.width=targetW+'px';svg.style.height=targetH+'px';}"
-    "function syncMermaidTypography(){var svgs=document.querySelectorAll('.mdv-mermaid svg');"
+    "function syncMermaidTypography(){var svgs=mdvQSA(document,'.mdv-mermaid svg');"
     "var cs=window.getComputedStyle?window.getComputedStyle(document.body,null):null;"
     "var ff=cs&&cs.fontFamily?cs.fontFamily:document.body.style.fontFamily;"
     "var fz=cs&&cs.fontSize?cs.fontSize:document.body.style.fontSize;"
@@ -2096,7 +2243,7 @@ static void build_js(StrBuf* sb) {
 
     /* Line numbers toggle */
     "function tl(){"
-    "var y=mdvScrollY();ln=ln?0:1;var ps=document.querySelectorAll('pre');"
+    "var y=mdvScrollY();ln=ln?0:1;var ps=mdvQSA(document,'pre');"
     "for(var i=0;i<ps.length;i++){"
     "var p=ps[i];"
     "if(ln&&!p._lnDone){"
@@ -2116,7 +2263,7 @@ static void build_js(StrBuf* sb) {
     "  code.innerHTML='';code.appendChild(wrap);"
     "  p.className=(p.className?p.className+' ':'')+'ln';p._lnDone=1;"
     "}else if(!ln&&p._lnDone){"
-    "  var cd2=p.querySelector('.ln-code');if(cd2){var code2=p.getElementsByTagName('code')[0];"
+    "  var cd2=mdvQS(p,'.ln-code');if(cd2){var code2=p.getElementsByTagName('code')[0];"
     "  if(code2){code2.innerHTML=cd2.innerHTML;}}"
     "  p.className=p.className.replace(/\\bln\\b/g,'').replace(/^\\s+|\\s+$/g,'');p._lnDone=0;"
     "}}"
@@ -2124,8 +2271,8 @@ static void build_js(StrBuf* sb) {
 
     /* TOC */
     "function btoc(){var toc=document.getElementById('mdv-toc');"
-    "var hs=document.querySelectorAll('h1[id],h2[id],h3[id],h4[id]');"
-    "var old=toc.querySelectorAll('.ti');for(var i=0;i<old.length;i++)old[i].parentNode.removeChild(old[i]);"
+    "var hs=mdvQSA(document,'h1[id],h2[id],h3[id],h4[id]');"
+    "var old=mdvQSA(toc,'.ti');for(var i=0;i<old.length;i++)old[i].parentNode.removeChild(old[i]);"
     "for(var i=0;i<hs.length;i++){var h=hs[i],a=document.createElement('a');"
     "a.className='ti t'+h.tagName.charAt(1);a.innerText=h.innerText;a.href='#'+h.id;"
     "a.onclick=(function(id){return function(e){e.preventDefault?e.preventDefault():e.returnValue=false;var el=document.getElementById(id);if(el)mdvScrollElToTop(el,12)}})(h.id);"
@@ -2166,7 +2313,7 @@ static void build_js(StrBuf* sb) {
     "if(n.nodeType===3){nodes.push(n);continue;}"
     "ch=n.childNodes;if(!ch)continue;for(i=ch.length-1;i>=0;i--)stack.push(ch[i]);}"
     "return{_nodes:nodes,_idx:-1,currentNode:null,nextNode:function(){this._idx++;if(this._idx>=this._nodes.length)return false;this.currentNode=this._nodes[this._idx];return true;}}}"
-    "function cf(){var ms=document.querySelectorAll('.hl');for(var i=0;i<ms.length;i++){"
+    "function cf(){var ms=mdvQSA(document,'.hl');for(var i=0;i<ms.length;i++){"
     "var m=ms[i],p=m.parentNode;p.replaceChild(document.createTextNode(m.textContent||m.innerText||''),m);p.normalize()}"
     "fm=[];fi=-1;document.getElementById('mdv-fc').innerText=''}"
 
@@ -2207,7 +2354,7 @@ static void build_js(StrBuf* sb) {
     "  if(idx<v.length)f.appendChild(document.createTextNode(v.substring(idx)));"
     "}"
     "nd.parentNode.replaceChild(f,nd);}"
-    "fm=document.querySelectorAll('.hl');fi=fm.length>0?0:-1;ufh()}"
+    "fm=mdvQSA(document,'.hl');fi=fm.length>0?0:-1;ufh()}"
 
     "function ufh(){for(var i=0;i<fm.length;i++)fm[i].className='hl';"
     "if(fi>=0&&fi<fm.length){"
@@ -2245,7 +2392,7 @@ static void build_js(StrBuf* sb) {
 
     /* Syntax highlighting — regex-based, applied once on load */
     "function shAll(){"
-    "var pres=document.querySelectorAll('pre code[class]');"
+    "var pres=mdvQSA(document,'pre code[class]');"
     "for(var i=0;i<pres.length;i++){var el=pres[i],cls=el.className||'';"
     "var lang=cls.replace('language-','');"
     "if(!lang)continue;"
@@ -2303,7 +2450,7 @@ static void build_js(StrBuf* sb) {
 
     /* Expand/collapse for long blocks */
     "function initCollapse(){"
-    "var blocks=document.querySelectorAll('pre,blockquote');"
+    "var blocks=mdvQSA(document,'pre,blockquote');"
     "for(var i=0;i<blocks.length;i++){"
     "var b=blocks[i];if(b.scrollHeight>420){"
     "b.className=(b.className?b.className+' ':'')+'mdv-collapsible';"
@@ -2318,6 +2465,15 @@ static void build_js(StrBuf* sb) {
     "}}}"
 
     /* Keyboard handler (backup — primary interception is via IE subclass) */
+    "function mdvSupportsDetails(){var d=document.createElement?document.createElement('details'):null;return !!(d&&typeof d.open!=='undefined')}"
+    "function mdvSetDetailsState(d,open){var i,n,seen=0;if(!d)return;for(i=0;i<d.childNodes.length;i++){n=d.childNodes[i];if(n.nodeType===1&&n.tagName==='SUMMARY'){seen=1;continue;}if(!seen)continue;if(n.nodeType===1)n.style.display=open?'':'none';}if(open){if(d.setAttribute)d.setAttribute('open','open');else d.open=true;}else{if(d.removeAttribute)d.removeAttribute('open');else d.open=false;}}"
+    "function initDetailsFallback(){var ds,i,d,ss,s,open;"
+    "if(mdvSupportsDetails())return;"
+    "ds=document.getElementsByTagName('details');"
+    "for(i=0;i<ds.length;i++){d=ds[i];ss=d.getElementsByTagName('summary');if(!ss||ss.length===0)continue;s=ss[0];"
+    "open=(d.getAttribute&&d.getAttribute('open')!==null)||d.open?1:0;mdvSetDetailsState(d,open);"
+    "s.onclick=(function(det){return function(e){e=e||window.event;if(e.preventDefault)e.preventDefault();else e.returnValue=false;mdvSetDetailsState(det,!(det.getAttribute&&det.getAttribute('open')!==null));return false;};})(d);"
+    "}}"
     "function mmTrim(s){return s?s.replace(/^\\s+|\\s+$/g,''):''}"
     "function mmNodeToken(s){var m=/^([A-Za-z0-9_:-]+)(.*)$/.exec(mmTrim(s)),mm;if(!m)return null;"
     "var id=m[1],rest=mmTrim(m[2]),text=id,shape='rect';"
@@ -2358,7 +2514,7 @@ static void build_js(StrBuf* sb) {
     "if(!changed)break;}return ctx}"
     "function mmSvgEl(name){return document.createElementNS('http://www.w3.org/2000/svg',name)}"
     "function mmRender(block){"
-    "var srcEl=block.querySelector('.mdv-mermaid-src'),view=block.querySelector('.mdv-mermaid-view'),ctx;"
+    "var srcEl=mdvQS(block,'.mdv-mermaid-src'),view=mdvQS(block,'.mdv-mermaid-view'),ctx;"
     "if(!srcEl||!view)return;ctx=mmParse(srcEl.innerText||srcEl.textContent||'');if(!ctx)return;"
     "var isHorizontal=(ctx.dir==='LR'||ctx.dir==='RL'),isReverse=(ctx.dir==='BT'||ctx.dir==='RL');"
     "var levels={},rows=[],maxLevel=0,maxSpan=0,svg=mmSvgEl('svg'),defs=mmSvgEl('defs'),mk=mmSvgEl('marker');"
@@ -2391,7 +2547,7 @@ static void build_js(StrBuf* sb) {
     "shape.setAttribute('class','mdv-mm-node');svg.appendChild(shape);"
     "txt=mmSvgEl('text');txt.setAttribute('x',n.x);txt.setAttribute('y',n.y+4);txt.setAttribute('text-anchor','middle');txt.setAttribute('class','mdv-mm-text');txt.appendChild(document.createTextNode(n.text));svg.appendChild(txt);}"
     "view.innerHTML='';view.appendChild(svg);block.className+=(block.className?' ':'')+'ok'}"
-    "function initMermaid(){var blocks=document.querySelectorAll('.mdv-mermaid[data-mdv-mermaid]');for(var i=0;i<blocks.length;i++)mmRender(blocks[i])}"
+    "function initMermaid(){var blocks=mdvQSA(document,'.mdv-mermaid[data-mdv-mermaid]');for(var i=0;i<blocks.length;i++)mmRender(blocks[i])}"
     "function mmApplySvgTextStyle(el){var cs,fz,ff;if(!el)return;cs=window.getComputedStyle?window.getComputedStyle(document.body,null):null;"
     "ff=cs&&cs.fontFamily?cs.fontFamily:document.body.style.fontFamily;fz=cs&&cs.fontSize?cs.fontSize:document.body.style.fontSize;"
     "if(ff){el.style.fontFamily=ff;try{el.setAttribute('font-family',ff);}catch(ex){}}"
@@ -2513,14 +2669,14 @@ static void build_js(StrBuf* sb) {
     "if(/^(graph|flowchart)\\b/i.test(first))return mmParseFlow(src);"
     "return null}"
     "function mmRender(block){"
-    "var srcEl=block.querySelector('.mdv-mermaid-src'),view=block.querySelector('.mdv-mermaid-view'),ctx,ok=0;"
+    "var srcEl=mdvQS(block,'.mdv-mermaid-src'),view=mdvQS(block,'.mdv-mermaid-view'),ctx,ok=0;"
     "if(!srcEl||!view)return;ctx=mmParse(srcEl.innerText||srcEl.textContent||'');if(!ctx)return;"
     "if(ctx.kind==='flow')ok=mmRenderFlow(view,ctx);"
     "else if(ctx.kind==='sequence')ok=mmRenderSequence(view,ctx);"
     "else if(ctx.kind==='class')ok=mmRenderClass(view,ctx);"
     "else if(ctx.kind==='state')ok=mmRenderState(view,ctx);"
     "if(ok){block.className+=(block.className?' ':'')+'ok';syncMermaidTypography();if(window.setTimeout)window.setTimeout(syncMermaidTypography,0);}}"
-    "function initMermaid(){var blocks=document.querySelectorAll('.mdv-mermaid[data-mdv-mermaid]');for(var i=0;i<blocks.length;i++)mmRender(blocks[i])}"
+    "function initMermaid(){var blocks=mdvQSA(document,'.mdv-mermaid[data-mdv-mermaid]');for(var i=0;i<blocks.length;i++)mmRender(blocks[i])}"
 #if _WIN32_WINNT < 0x0600
     "function fitMermaidSvg(svg){return;}"
     "function syncMermaidTypography(){return;}"
@@ -2562,7 +2718,7 @@ static void build_js(StrBuf* sb) {
     "inp.onpaste=trig;"
     "inp.oncut=trig;"
     "}"
-    "initMermaid();shAll();initCollapse();initLinkTooltips();"
+    "initMermaid();shAll();initCollapse();initDetailsFallback();initLinkTooltips();"
     "if(ln)tl();"  /* apply line numbers if saved */
     "usv();"
     "ucc();"
@@ -2613,14 +2769,14 @@ static const char* get_ui(void) {
     "<div class=\"hrow\"><span>Find in page</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">F</span></span></div>"
     "<div class=\"hrow\"><span>Select all in active view</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">A</span></span></div>"
     "<div class=\"hrow\"><span>Continue Find forward</span><span class=\"hkeys\"><span class=\"kc\">F3</span></span></div>"
-    "<div class=\"hrow\"><span>Continue Find backward</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">F3</span></span></div>"
+    "<div class=\"hrow\"><span>Continue Find backward</span><span class=\"hkeys\"><span class=\"kc\">Shift</span><span class=\"kc-plus\">+</span><span class=\"kc\">F3</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
     "<div class=\"hrow\"><span>Close viewer</span><span class=\"hkeys\"><span class=\"kc\">Esc</span></span></div>"
     "<div class=\"hrow\"><span>This help</span><span class=\"hkeys\"><span class=\"kc\">F1</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
-    "<div class=\"help-foot\">MDView v3.0 &middot; Settings auto-saved &middot; Press Esc to close</div>"
+    "<div class=\"help-foot\">MDView v3.3 &middot; Settings auto-saved &middot; Press Esc to close</div>"
     "</div>";
 }
 
@@ -2632,6 +2788,22 @@ static const char* get_ui(void) {
     #define LCS_MATCHCASE   2
     #define LCS_WHOLEWORDS  4
     #define LCS_BACKWARDS   8
+#endif
+
+#ifndef LC_COPY
+    #define LC_COPY        1
+    #define LC_NEWPARAMS   2
+    #define LC_SELECT_ALL  3
+    #define LC_SETPERCENT  4
+
+    #define LCP_WRAPTEXT      1
+    #define LCP_FITTOWINDOW   2
+    #define LCP_ANSI          4
+    #define LCP_ASCII         8
+    #define LCP_VARIABLE      12
+    #define LCP_FORCESHOW     16
+    #define LCP_FITLARGERONLY 32
+    #define LCP_CENTER        64
 #endif
 
 static void js_find_apply(MDViewData* d, const wchar_t* needle, int matchCase, int wholeWords) {
@@ -3141,7 +3313,55 @@ __declspec(dllexport) int __stdcall ListSearchTextW(HWND w, WCHAR* searchString,
     js_find_step(d, backwards);
     return LISTPLUGIN_OK;
 }
-__declspec(dllexport) int __stdcall ListSendCommand(HWND w, int c, int p) { return LISTPLUGIN_OK; }
+__declspec(dllexport) int __stdcall ListSendCommand(HWND w, int c, int p) {
+    MDViewData* d = (MDViewData*)mdview_get_window_ptr(w, GWLP_USERDATA);
+    if (!d) return LISTPLUGIN_ERROR;
+
+    switch (c) {
+    case LC_COPY:
+        do_copy(d);
+        return LISTPLUGIN_OK;
+
+    case LC_SELECT_ALL:
+        do_select_all(d);
+        return LISTPLUGIN_OK;
+
+    case LC_SETPERCENT:
+        if (d->pBrowser) {
+            wchar_t js[256];
+            if (p < 0) p = 0;
+            if (p > 100) p = 100;
+            _snwprintf_s(js, _countof(js), _TRUNCATE,
+                L"(function(){var de=document.documentElement||document.body,b=document.body;"
+                L"var sh=Math.max((b&&b.scrollHeight)||0,(de&&de.scrollHeight)||0);"
+                L"var ch=Math.max((b&&b.clientHeight)||0,(de&&de.clientHeight)||0);"
+                L"var y=((sh>ch)?((sh-ch)*%d/100):0);window.scrollTo(0,y);})();",
+                p);
+            exec_js(d->pBrowser, js);
+        }
+        if (d->splitView && d->hwndText) sync_html_to_edit(d);
+        return LISTPLUGIN_OK;
+
+    case LC_NEWPARAMS:
+        /* TC can notify viewer mode changes here. MDView keeps its own rendering model. */
+        (void)p;
+        return LISTPLUGIN_OK;
+    }
+
+    return LISTPLUGIN_ERROR;
+}
+
+__declspec(dllexport) int __stdcall ListPrint(HWND w, char* fileToPrint, char* defPrinter, int printFlags, RECT* margins) {
+    MDViewData* d = (MDViewData*)mdview_get_window_ptr(w, GWLP_USERDATA);
+    (void)fileToPrint;
+    (void)defPrinter;
+    (void)printFlags;
+    (void)margins;
+
+    if (!d || !d->pBrowser) return LISTPLUGIN_ERROR;
+    browser_execwb(d->pBrowser, OLECMDID_PRINT);
+    return LISTPLUGIN_OK;
+}
 
 __declspec(dllexport) void __stdcall ListSetDefaultParams(ListDefaultParamStruct* p) {
     if (p && p->DefaultIniName[0]) {
