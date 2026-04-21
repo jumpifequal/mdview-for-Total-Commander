@@ -23,10 +23,11 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 
 ## Features
 
-- **Full Markdown rendering** - headings, bold, italic, strikethrough, links, images, tables with column alignment, fenced and indented code blocks, blockquotes (nested), ordered and unordered lists, task lists, horizontal rules, autolinks, and escape sequences
+- **Markdown core rendering** - headings, bold, italic, strikethrough, highlight (`==text==`), links, images, tables with alignment (`:---`, `---:`, `:---:`), fenced and indented code blocks, blockquotes (nested), ordered and unordered lists, task lists, horizontal rules, autolinks, and escape sequences
 - **Syntax highlighting** - JavaScript, TypeScript, Python, C, C++, C#, Java, Rust, Go, SQL, Bash, CSS/SCSS, PHP, HTML, XML, and YAML front matter
 - **Built-in Mermaid diagrams** - self-contained support for `graph` / `flowchart`, `sequenceDiagram`, `classDiagram`, `stateDiagram`, and `stateDiagram-v2`
 - **Consistent Mermaid typography** - supported Mermaid diagrams follow the active viewer font family and font size from MDView settings
+- **Emoji shortcode support** - a curated set of common shortcodes such as `:smile:`, `:heart:`, `:+1:`, `:rocket:`, `:warning:`, `:white_check_mark:`, and similar everyday aliases
 - **Dark / light mode** - toggle with `Ctrl+D`, or auto-detected from the Windows theme on first launch
 - **Adjustable layout** - zoom in and out, optionally constrain reading column width
 - **Line numbers** - toggle on code blocks with `Ctrl+L`
@@ -44,11 +45,12 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
   - Copy from rendered view -> formatted HTML + plain text
   - Copy from raw view -> original Markdown text
 - **Expand / collapse** - long code blocks and blockquotes are collapsed by default with a "Show more" button
+- **Raw HTML collapsible sections** - block-level `<details>` / `<summary>` sections are preserved, with a viewer fallback for older MSHTML engines that do not implement native HTML5 details controls
 - **Persistent settings** - font size, theme, column width, line numbers, and raw view settings are saved and restored between sessions
 - **Print support** - `Ctrl+P` renders a clean printable version
 - **Progress bar** - subtle reading position indicator at the top of the viewport
 - **Full window resize** - content fills the viewport correctly when the lister window is resized or maximised
-- **Respect Total Commander interaction patterns** where applicable. Keys 1..9, N, and P must work according to the concept adopted in Total Commander. F3 and F7 behave like `Ctrl+F`
+- **Respect Total Commander interaction patterns** where applicable. Keys `1..9`, `N`, and `P` are forwarded according to the lister concept, `F3` / `Shift+F3` continue in-page search, `F7` opens search, and TC menu commands such as Copy, Select all, Print, and scroll-percent are wired through the WLX command callbacks
 - No temporary HTML files are created; everything stays in memory
 - Support for mixed Markdown and HTML content
 
@@ -86,7 +88,11 @@ For the dedicated Windows XP build, Mermaid blocks fall back to the original sou
 | `Ctrl` `P`         | Print                             |
 | `Ctrl` `G`         | Go to top                         |
 | `Ctrl` `M`         | Toggle split view                 |
+| `Ctrl` `A`         | Select all in active view         |
 | `Ctrl` `C`         | Copy selection                    |
+| `F3`               | Find next                         |
+| `Shift` `F3`       | Find previous                     |
+| `F7`               | Open find                         |
 | `Esc`              | Close viewer                      |
 | `F1`               | Show shortcut reference           |
 
@@ -119,6 +125,10 @@ For Mermaid validation, use `test_mermaid.md`. It covers the Mermaid diagram fam
 
 For relative-link and front-matter regression checks, use `Sample_md_files\readme_problematic.md` and `Sample_md_files\SKILL.md`.
 
+For collapsible-section regression checks, use `Sample_md_files\markdown_en.md`.
+
+For embedded-image regression reference, use `Sample_md_files\file_with_embedded_image.md` to verify the current unsupported case documented below.
+
 ## Building from Source
 
 The plugin is implemented in a single C source file and can be built natively on Windows with MSVC.
@@ -138,6 +148,20 @@ The project also includes `resource.rc` and `resource.h`, so the Win32, x64, and
 ## How It Works
 
 MDView is a WLX lister plugin that Total Commander loads when you press `F3` on a matching file type. It contains a built-in Markdown-to-HTML converter and embeds an MSHTML WebBrowser control to render the output. Keyboard input is handled by subclassing the browser's internal window, giving reliable hotkey interception without interfering with normal scrolling or Total Commander key handling. The OLE control and its child window hierarchy are resized via `IOleInPlaceObject::SetObjectRects` and `MoveWindow` so the viewer fills the lister window at any size. Settings are persisted via the standard Total Commander INI mechanism.
+
+## Known Limitations
+
+MDView intentionally implements a pragmatic Markdown subset rather than a full CommonMark / GFM engine. The current tradeoff favors a single-file, dependency-light viewer over exhaustive spec coverage.
+
+- **Math formulas are not rendered.** `$...$` and `$$...$$` are not interpreted as TeX/LaTeX math.
+- **Emoji shortcode support is curated, not exhaustive.** Common shortcodes are supported, but MDView does not ship a full GitHub-style emoji catalog.
+- **Reference-style image and link definitions are limited.** Inline links/images are the primary supported path. Sample cases such as embedded `data:` image references at the end of the document are not fully supported.
+- **Raw HTML passthrough is selective.** `<table>` and block-level `<details>` / `<summary>` are preserved, but MDView is not a full generic HTML block parser.
+- **`<details>` support may use a viewer fallback.** On older MSHTML engines, collapsible sections are emulated in script rather than provided natively by the browser control.
+- **Mermaid support is intentionally partial.** Supported diagram families are `graph` / `flowchart`, `sequenceDiagram`, `classDiagram`, `stateDiagram`, and `stateDiagram-v2`. Other Mermaid syntaxes fall back to the original source block.
+- **Mermaid on Windows XP is disabled.** XP builds show Mermaid source blocks instead of rendered diagrams for stability.
+- **Directives such as `[TOC]` and footnotes are not fully implemented.** They may render as ordinary text rather than as generated navigation or note structures.
+- **The parser is not a full spec-compliance engine.** Edge cases involving deeply nested emphasis, exotic HTML/Markdown interactions, or advanced extension syntax may differ from CommonMark/GFM behavior.
 
 ## File List
 
