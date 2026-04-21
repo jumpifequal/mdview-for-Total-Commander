@@ -19,7 +19,21 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 
 ## Screenshots
 
-> *TODO: Add screenshots of light mode, dark mode, split view, and Mermaid rendering.*
+| Light Mode                                | Dark Mode                               |
+| ----------------------------------------- | --------------------------------------- |
+| ![Light mode](screenshots/light-mode.png) | ![Dark mode](screenshots/dark-mode.png) |
+
+| Split View                                | Table of Contents                     |
+| ----------------------------------------- | ------------------------------------- |
+| ![Split view](screenshots/split-view.png) | ![TOC view](screenshots/toc-view.png) |
+
+| Help View                               | Mermaid Rendering 1                                         |
+| --------------------------------------- | ----------------------------------------------------------- |
+| ![Help view](screenshots/help-view.png) | ![Mermaid rendering 1](screenshots/mermaid-rendering-1.png) |
+
+| Mermaid Rendering 2                                         | Mermaid Rendering 3                                         |
+| ----------------------------------------------------------- | ----------------------------------------------------------- |
+| ![Mermaid rendering 2](screenshots/mermaid-rendering-2.png) | ![Mermaid rendering 3](screenshots/mermaid-rendering-3.png) |
 
 ## Features
 
