@@ -1,8 +1,8 @@
-# MDView
+# MDView 3.6
 
 **A Markdown viewer plugin for Total Commander.**
 
-Press `F3` on any `.md` file and get a clean, fully rendered preview with dark mode, syntax highlighting, table of contents, find-in-page, split view, and built-in Mermaid support.
+Press `F3` on any `.md` file and get a clean, fully rendered preview with dark mode, syntax highlighting, table of contents, upgraded find-in-page controls, split view, and built-in Mermaid support.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -43,10 +43,10 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Consistent Mermaid typography** - supported Mermaid diagrams follow the active viewer font family and font size from MDView settings
 - **Emoji shortcode support** - a curated set of common shortcodes such as `:smile:`, `:heart:`, `:+1:`, `:rocket:`, `:warning:`, `:white_check_mark:`, and similar everyday aliases
 - **Dark / light mode** - toggle with `Ctrl+D`, or auto-detected from the Windows theme on first launch
-- **Adjustable layout** - zoom in and out, optionally constrain reading column width
+- **Adjustable layout** - zoom in and out, with content fit to the Lister window
 - **Line numbers** - toggle on code blocks with `Ctrl+L`
 - **Table of Contents** - auto-generated sidebar from headings
-- **Find in page** - incremental search with match highlighting and navigation
+- **Find in page** - compact advanced search with match highlighting, whole-word, case-sensitive, live search, and optional explicit start-search mode
 - **Tooltip on links** - hovering a link shows the resolved target URL
 - **Relative link handling** - local Markdown links and images resolve correctly against the current document, including `./`, `../`, nested paths, and `#fragment` suffixes
 - **Safe link opening** - linked Markdown files open inside MDView instead of blanking the embedded browser; other links are handed off to Windows
@@ -54,13 +54,15 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Split view** - rendered Markdown alongside the raw Markdown source with `Ctrl+M`
 - **Raw Markdown viewer** - implemented with the Windows RichEdit control using a configurable monospace font
 - **Character count with spaces** - both rendered and raw views show a character count aligned to a Word-like convention that excludes line breaks
-- **Scroll synchronisation** - rendered HTML and raw Markdown views stay aligned using ratio-based document scrolling
+- **Scroll synchronisation** - rendered HTML and raw Markdown views stay aligned by visible source-line/block anchors, with the focused pane driving the other pane
+- **Manual split-view alignment** - use `Ctrl+Y` or the `Sync panes here` context-menu command to re-align the inactive pane around the current cursor, clicked block, or visible anchor
 - **Smart clipboard behaviour**
   - Copy from rendered view -> formatted HTML + plain text
   - Copy from raw view -> original Markdown text
+- **TC copy as text support** - Total Commander "Copy as text" exports only the rendered markdown text, without the viewer status overlays
 - **Expand / collapse** - long code blocks and blockquotes are collapsed by default with a "Show more" button
 - **Raw HTML collapsible sections** - block-level `<details>` / `<summary>` sections are preserved, with a viewer fallback for older MSHTML engines that do not implement native HTML5 details controls
-- **Persistent settings** - font size, theme, column width, line numbers, and raw view settings are saved and restored between sessions
+- **Persistent settings** - font size, theme, line numbers, and raw view settings are saved and restored between sessions
 - **Print support** - `Ctrl+P` renders a clean printable version
 - **Progress bar** - subtle reading position indicator at the top of the viewport
 - **Full window resize** - content fills the viewport correctly when the lister window is resized or maximised
@@ -93,8 +95,6 @@ For the dedicated Windows XP build, Mermaid blocks fall back to the original sou
 | `Ctrl` `+`         | Zoom in                           |
 | `Ctrl` `-`         | Zoom out                          |
 | `Ctrl` `0`         | Reset zoom                        |
-| `Ctrl` `W`         | Constrain column width            |
-| `Ctrl` `Shift` `W` | Widen or remove column constraint |
 | `Ctrl` `D`         | Toggle dark / light mode          |
 | `Ctrl` `L`         | Toggle line numbers               |
 | `Ctrl` `T`         | Table of Contents                 |
@@ -111,6 +111,10 @@ For the dedicated Windows XP build, Mermaid blocks fall back to the original sou
 | `F1`               | Show shortcut reference           |
 
 Press `F1` inside the viewer for an on-screen reference.
+
+## Version
+
+Current release: **MDView 3.6**
 
 ## Download
 

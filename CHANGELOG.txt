@@ -1,3 +1,97 @@
+v3.6
+- fix: ordered lists now tolerate a single missing indentation level on immediate item continuation paragraphs without continuing numbering across section breaks
+- fix: split view now synchronises by visible Markdown source anchors instead of raw scroll percentages, keeping rendered preview and source text aligned across different content heights
+- fix: the most recently interacted pane now drives split-view synchronisation, with guards to prevent feedback loops during follower scrolling
+- add: "Sync panes here" context-menu command and Ctrl+Y shortcut manually re-align the inactive pane from the current focus/cursor/visible anchor
+- fix: clicking in either split-view pane now aligns the other pane to the same mouse row using source-line/block anchors and RichEdit visual-position correction for wrapped raw lines
+- change: the raw character count no longer consumes a fixed header above the source pane; it is available from the context menu while preserving text area
+
+v3.5
+- add: "Disable search as you type" option lets slower systems defer expensive search until the explicit "Start searching" button is pressed
+- fix: "Split text view" now behaves as a real checked menu toggle reflecting the active split-view state
+- change: removed the Ctrl+W and Ctrl+Shift+W keyboard shortcuts for column width commands
+- change: replaced content-width menu entries with a checked "Fit to window" toggle
+- fix: embedded images now fit the Lister window in fit-to-window mode and return to real size when fit-to-window is disabled
+
+v3.4
+- add: compact advanced find panel with whole-word, case-sensitive, find-as-you-type, and explicit "Start searching" controls
+- fix: alternative Windows clipboard shortcuts now work consistently in search and editor contexts (`Ctrl+Ins` copy, `Shift+Ins` paste)
+- fix: rendered-view `Ctrl+A` now selects only document content instead of the viewer chrome overlays
+- fix: Total Commander "Copy as text" now copies only the rendered Markdown text instead of the UI status overlays
+- fix: Table of Contents typography now follows the active markdown rendering font size more closely
+
+v3.3
+- fix: Total Commander menu and lister commands are now routed consistently through WLX callbacks for Copy, Select all, Print, and lister scroll-percent updates
+- fix: Windows XP search reliability is improved by avoiding modern selector assumptions in the embedded MSHTML engine
+- add: `==highlight==` inline rendering
+- add: curated support for common emoji shortcodes such as `:smile:`, `:heart:`, `:+1:`, `:rocket:`, and other frequently used aliases
+- add: block-level `<details>` / `<summary>` passthrough for collapsible sections
+- fix: older MSHTML engines now get a script fallback for `<details>` so summary rows remain clickable when native HTML5 support is missing
+- docs: README shortcut list and on-screen help are aligned with the implemented search keys (`F3` / `Shift+F3` / `F7`)
+- docs: README and changelog now document supported Markdown extensions and current limitations, including partial Mermaid scope, missing math rendering, and limited reference-style embedded image support
+
+v3.2
+- fix: relative Markdown links now resolve against the current document path, including ./, ../, nested paths, images, and file fragments
+- fix: clicking a local Markdown link no longer blanks the embedded browser; linked Markdown files now open inside MDView and non-Markdown links are opened by Windows
+- fix: YAML front matter at the top of SKILL-style documents now renders as a highlighted YAML block instead of flattened prose
+
+v3.1
+- add: Respect Total Commander interaction patterns where applicable. Keys 1..9, N, and P must work according to the concept adopted in Total Commander. F3 and F7 behave like CTRL-F
+- fix: no temporary html files are created now, all is in memory
+- add: support for mixed html, md files with html tags
+- add: scale is now visible
+- fix: modal dialog fox low-rew screen is not entirely visible
+- fix: scrolling is jerky and cannot be controlled line-by-line, also in split view
+- fix: TOC is useful but link positioning is incorrect.
+- fix: Line Numbers is toggleable, but the UI/state handling is wrong.
+- fix: Split Source View is useful in theory but currently not synchronized.
+- fix: The searchable input field does not properly support paste from clipboard.
+- add: Rendering scale can be changed, which is useful.
+
+v 3.0
+- add: char with spaces count
+
+v2.9
+- add: URL tooltip preview now shows the resolved link target on hover
+
+v 2.8
+- fix: generic memory leak and memory handling improvements
+- build: Visual Studio project now includes resource.rc/resource.h so generated binaries carry version metadata
+- build: ReleaseXP|Win32 is aligned with the XP-capable v141_xp toolset and legacy SDK support in current Visual Studio setups
+
+v 2.6
+- add: dedicated Visual Studio configuration ReleaseXP|Win32 for an XP-compatible 32-bit build
+- add: XP-specific compatibility wrappers and fallbacks isolated behind _WIN32_WINNT
+- add: XP build now uses an XP-capable toolset and static CRT linkage to avoid modern runtime dependencies
+- fix: raw Markdown default font now falls back to Courier New on XP while keeping Cascadia Mono on modern Windows
+- fix: dark theme auto-detection is disabled on XP and remains unchanged on modern Windows
+- change: Mermaid rendering is intentionally disabled on the XP build and falls back to the original source block for stability
+
+v 2.5
+- fix: Mermaid SVG sizing now stays visually consistent with the surrounding Markdown layout
+- fix: Mermaid typography is now applied centrally so supported diagram types use the active viewer font size and font family more consistently
+- fix: sequenceDiagram parsing now handles arrow operators such as -->> correctly without creating malformed participant names
+- fix: sequenceDiagram note boxes now wrap long text correctly and keep note text inside the note rectangle
+- fix: classDiagram relation parsing now recognises operators containing >
+- fixclassDiagram routing avoids passing int-row relations through class boxes and reduces label collisions in dense layouts
+- fix: stateDiagram parsing now handles pseudo-states correctly and renders simple vertical flows with direct state-to-state arrows
+
+v 2.4
+- add: built-in Mermaid rendering for flowchart/graph diagrams
+- add: built-in Mermaid rendering for sequenceDiagram diagrams
+- add: built-in Mermaid rendering for classDiagram diagrams
+- add: built-in Mermaid rendering for stateDiagram-v2 diagrams
+- add: Mermaid diagrams are rendered self-contained inside the WLX/WLX64 binaries
+- add: Mermaid diagram typography follows the active viewer font size and font family
+- add: test_mermaid.md contains a dedicated sample set for all Mermaid diagram types currently supported
+
+v 2.3
+- add: ctrl-F, F3 and shift-F3 now work correctly
+- add: source code ready to be compiled under WinXP
+- add: font and dimension of split view (ctrl-m) is now in ini file
+- add: ctrl-A to select all (do it like ctrl-c in the window with the focus)
+- add: ESC in split view esc from lister
+
 v 2.2
 - add:Contextual Right Click Menu
 - add:Split view mode showing rendered Markdown alongside the raw Markdown source (Ctrl+M)
@@ -13,73 +107,3 @@ v 2.2
 - fix:Changed to safe functions (e.g., scanf -> sscanf_s, strncpy -> strncpy_s)
 - fix:Use-after-free bug causing corrupted text in split view raw pane
 - fix:Clipboard behaviour in preview mode copying only plain text
-
-v 2.3
-- add: ctrl-F, F3 and shift-F3 now work correctly
-- add: source code ready to be compiled under WinXP
-- add: font and dimension of split view (ctrl-m) is now in ini file
-- add: ctrl-A to select all (do it like ctrl-c in the window with the focus)
-- add: ESC in split view esc from lister
-
-v 2.4
-- add: built-in Mermaid rendering for flowchart/graph diagrams
-- add: built-in Mermaid rendering for sequenceDiagram diagrams
-- add: built-in Mermaid rendering for classDiagram diagrams
-- add: built-in Mermaid rendering for stateDiagram-v2 diagrams
-- add: Mermaid diagrams are rendered self-contained inside the WLX/WLX64 binaries
-- add: Mermaid diagram typography follows the active viewer font size and font family
-- add: test_mermaid.md contains a dedicated sample set for all Mermaid diagram types currently supported
-
-v 2.5
-- fix: Mermaid SVG sizing now stays visually consistent with the surrounding Markdown layout
-- fix: Mermaid typography is now applied centrally so supported diagram types use the active viewer font size and font family more consistently
-- fix: sequenceDiagram parsing now handles arrow operators such as -->> correctly without creating malformed participant names
-- fix: sequenceDiagram note boxes now wrap long text correctly and keep note text inside the note rectangle
-- fix: classDiagram relation parsing now recognises operators containing >
-- fixclassDiagram routing avoids passing int-row relations through class boxes and reduces label collisions in dense layouts
-- fix: stateDiagram parsing now handles pseudo-states correctly and renders simple vertical flows with direct state-to-state arrows
-
-v 2.6
-- add: dedicated Visual Studio configuration ReleaseXP|Win32 for an XP-compatible 32-bit build
-- add: XP-specific compatibility wrappers and fallbacks isolated behind _WIN32_WINNT
-- add: XP build now uses an XP-capable toolset and static CRT linkage to avoid modern runtime dependencies
-- fix: raw Markdown default font now falls back to Courier New on XP while keeping Cascadia Mono on modern Windows
-- fix: dark theme auto-detection is disabled on XP and remains unchanged on modern Windows
-- change: Mermaid rendering is intentionally disabled on the XP build and falls back to the original source block for stability
-
-v 2.8
-- add: URL tooltip preview now shows the resolved link target on hover
-- fix: generic memory leak and memory handling improvements
-- build: Visual Studio project now includes resource.rc/resource.h so generated binaries carry version metadata
-- build: ReleaseXP|Win32 is aligned with the XP-capable v141_xp toolset and legacy SDK support in current Visual Studio setups
-
-v 3.0
-- add: char with spaces count
-
-v3.1
-- add: Respect Total Commander interaction patterns where applicable. Keys 1..9, N, and P must work according to the concept adopted in Total Commander. F3 and F7 behave like CTRL-F
-- fix: no temporary html files are created now, all is in memory
-- add: support for mixed html, md files with html tags
-- add: scale is now visible
-- fix: modal dialog fox low-rew screen is not entirely visible
-- fix: scrolling is jerky and cannot be controlled line-by-line, also in split view
-- fix: TOC is useful but link positioning is incorrect.
-- fix: Line Numbers is toggleable, but the UI/state handling is wrong.
-- fix: Split Source View is useful in theory but currently not synchronized.
-- fix: The searchable input field does not properly support paste from clipboard.
-- add: Rendering scale can be changed, which is useful.
-
-v3.2
-- fix: relative Markdown links now resolve against the current document path, including ./, ../, nested paths, images, and file fragments
-- fix: clicking a local Markdown link no longer blanks the embedded browser; linked Markdown files now open inside MDView and non-Markdown links are opened by Windows
-- fix: YAML front matter at the top of SKILL-style documents now renders as a highlighted YAML block instead of flattened prose
-
-v3.3
-- fix: Total Commander menu and lister commands are now routed consistently through WLX callbacks for Copy, Select all, Print, and lister scroll-percent updates
-- fix: Windows XP search reliability is improved by avoiding modern selector assumptions in the embedded MSHTML engine
-- add: `==highlight==` inline rendering
-- add: curated support for common emoji shortcodes such as `:smile:`, `:heart:`, `:+1:`, `:rocket:`, and other frequently used aliases
-- add: block-level `<details>` / `<summary>` passthrough for collapsible sections
-- fix: older MSHTML engines now get a script fallback for `<details>` so summary rows remain clickable when native HTML5 support is missing
-- docs: README shortcut list and on-screen help are aligned with the implemented search keys (`F3` / `Shift+F3` / `F7`)
-- docs: README and changelog now document supported Markdown extensions and current limitations, including partial Mermaid scope, missing math rendering, and limited reference-style embedded image support
