@@ -1,4 +1,4 @@
-# MDView 3.6
+# MDView 3.7
 
 **A Markdown viewer plugin for Total Commander.**
 
@@ -54,8 +54,8 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Split view** - rendered Markdown alongside the raw Markdown source with `Ctrl+M`
 - **Raw Markdown viewer** - implemented with the Windows RichEdit control using a configurable monospace font
 - **Character count with spaces** - both rendered and raw views show a character count aligned to a Word-like convention that excludes line breaks
-- **Scroll synchronisation** - rendered HTML and raw Markdown views stay aligned by visible source-line/block anchors, with the focused pane driving the other pane
-- **Manual split-view alignment** - use `Ctrl+Y` or the `Sync panes here` context-menu command to re-align the inactive pane around the current cursor, clicked block, or visible anchor
+- **Split-view positioning** - rendered HTML and raw Markdown panes keep independent scroll positions so manual reading does not jump unexpectedly
+- **Manual split-view alignment** - use `Ctrl+Y` or the `Sync panes here` context-menu command for best-effort source-line alignment from the focused pane
 - **Smart clipboard behaviour**
   - Copy from rendered view -> formatted HTML + plain text
   - Copy from raw view -> original Markdown text
@@ -66,7 +66,7 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Print support** - `Ctrl+P` renders a clean printable version
 - **Progress bar** - subtle reading position indicator at the top of the viewport
 - **Full window resize** - content fills the viewport correctly when the lister window is resized or maximised
-- **Respect Total Commander interaction patterns** where applicable. Keys `1..9`, `N`, and `P` are forwarded according to the lister concept, `F3` / `Shift+F3` continue in-page search, `F7` opens search, and TC menu commands such as Copy, Select all, Print, and scroll-percent are wired through the WLX command callbacks
+- **Respect Total Commander interaction patterns** where applicable. Keys `1..9`, `N`, and `P` are forwarded according to the lister concept, `F3` / `Shift+F3` continue in-page search, `F7` opens search or advances an existing query, and TC menu commands such as Copy, Select all, Print, and scroll-percent are wired through the WLX command callbacks
 - No temporary HTML files are created; everything stays in memory
 - Support for mixed Markdown and HTML content
 
@@ -102,19 +102,20 @@ For the dedicated Windows XP build, Mermaid blocks fall back to the original sou
 | `Ctrl` `P`         | Print                             |
 | `Ctrl` `G`         | Go to top                         |
 | `Ctrl` `M`         | Toggle split view                 |
+| `Ctrl` `Y`         | Sync split panes here             |
 | `Ctrl` `A`         | Select all in active view         |
 | `Ctrl` `C`         | Copy selection                    |
 | `F3`               | Find next                         |
 | `Shift` `F3`       | Find previous                     |
-| `F7`               | Open find                         |
-| `Esc`              | Close viewer                      |
+| `F7`               | Open find, or find next when the bar already has a query |
+| `Esc`              | Close find bar, TOC, or help; otherwise close viewer |
 | `F1`               | Show shortcut reference           |
 
 Press `F1` inside the viewer for an on-screen reference.
 
 ## Version
 
-Current release: **MDView 3.6**
+Current release: **MDView 3.7**
 
 ## Download
 

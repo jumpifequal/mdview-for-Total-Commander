@@ -1,3 +1,9 @@
+v3.7
+- add: double-clicking either split-view pane now runs the same explicit pane alignment command as Ctrl+Y
+- change: split-view scrolling is stable and independent by default; Ctrl+Y and the context-menu sync command remain the explicit best-effort alignment actions
+- fix: find bar keyboard access, Escape closing, close button visibility, button tooltips, and shortcut/help/menu documentation are kept consistent
+- fix: help overlay scrolling is contained so wheel input does not leak through to the underlying document view
+
 v3.6
 - fix: ordered lists now tolerate a single missing indentation level on immediate item continuation paragraphs without continuing numbering across section breaks
 - fix: split view now synchronises by visible Markdown source anchors instead of raw scroll percentages, keeping rendered preview and source text aligned across different content heights

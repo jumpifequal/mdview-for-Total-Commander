@@ -1,4 +1,4 @@
-# Complete Demonstration of Markdown Syntax Features
+﻿# Complete Demonstration of Markdown Syntax Features
 
 This document showcases all common Markdown syntax features and can be directly saved as a `.md` file to view the rendering effect.
 
