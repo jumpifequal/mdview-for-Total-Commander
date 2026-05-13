@@ -71,9 +71,6 @@
 #ifndef EM_SETSCROLLPOS
     #define EM_SETSCROLLPOS (WM_USER + 222)
 #endif
-#ifndef FR_DOWN
-    #define FR_DOWN 0x00000001
-#endif
 
 /* ── TC Lister Plugin Interface ──────────────────────────────────────── */
 
@@ -690,43 +687,6 @@ static int get_html_anchor_at_point(MDViewData* d, int x, int y, int* lineOut, i
     return 1;
 }
 
-static char* get_html_selection_text_utf8_dup(MDViewData* d) {
-    char title[2048];
-    char* decoded;
-    if (!d || !d->pBrowser) return NULL;
-    exec_js(d->pBrowser,
-        L"(function(){var s='';"
-        L"if(window.getSelection)s=String(window.getSelection());"
-        L"else if(document.selection)s=document.selection.createRange().text;"
-        L"s=s.replace(/\\s+/g,' ').replace(/^\\s+|\\s+$/g,'');"
-        L"if(s.length>240)s=s.substring(0,240);"
-        L"document.title='MDVSEL:'+encodeURIComponent(s);})();");
-    if (!get_document_title_utf8(d->pBrowser, title, (int)sizeof(title))) return NULL;
-    if (strncmp(title, "MDVSEL:", 7) != 0) return NULL;
-    decoded = url_percent_decode_dup(title + 7);
-    if (!decoded || !decoded[0]) {
-        if (decoded) free(decoded);
-        return NULL;
-    }
-    return decoded;
-}
-
-static int get_html_selection_line(MDViewData* d) {
-    char t[128];
-    int line = -1;
-    if (!d || !d->pBrowser) return -1;
-    exec_js(d->pBrowser,
-        L"(function(){var s=null,n=null,ln=-1;"
-        L"if(window.getSelection){s=window.getSelection();if(s&&s.rangeCount)n=s.getRangeAt(0).startContainer;}"
-        L"else if(document.selection){try{n=document.selection.createRange().parentElement();}catch(ex){}}"
-        L"if(n&&n.nodeType===3)n=n.parentNode;"
-        L"if(n&&window.mdvElementLine)ln=mdvElementLine(n);"
-        L"document.title='MDVSELLINE:'+ln;})();");
-    if (!get_document_title_utf8(d->pBrowser, t, (int)sizeof(t))) return -1;
-    if (sscanf_s(t, "MDVSELLINE:%d", &line) != 1) return -1;
-    return line;
-}
-
 static void set_html_top_line(MDViewData* d, int line) {
     wchar_t js[192];
     if (!d || !d->pBrowser || line < 0) return;
@@ -873,67 +833,6 @@ static int get_edit_line_y(HWND hEdit, int line, int* yOut) {
     return get_edit_char_y(hEdit, charIndex, yOut);
 }
 
-static wchar_t* get_edit_selection_text_dup(HWND hEdit) {
-    DWORD start = 0, end = 0;
-    DWORD len;
-    wchar_t* text;
-    if (!hEdit) return NULL;
-    SendMessageW(hEdit, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-    if (end <= start) return NULL;
-    len = end - start;
-    text = (wchar_t*)calloc((size_t)len + 1, sizeof(wchar_t));
-    if (!text) return NULL;
-    SendMessageW(hEdit, EM_GETSELTEXT, 0, (LPARAM)text);
-    if (len > 240) text[240] = 0;
-    return text;
-}
-
-static int get_edit_selection_start_line(HWND hEdit) {
-    DWORD start = 0, end = 0;
-    if (!hEdit) return -1;
-    SendMessageW(hEdit, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-    if (end <= start) return -1;
-    return (int)SendMessageW(hEdit, EM_LINEFROMCHAR, (WPARAM)start, 0);
-}
-
-static int prepare_sync_phrase_w(wchar_t* s, int stripMarkdown) {
-    wchar_t* src;
-    wchar_t* dst;
-    int pendingSpace = 0;
-    size_t len;
-    if (!s) return 0;
-
-    src = s;
-    dst = s;
-    while (*src && (*src == L' ' || *src == L'\t' || *src == L'\r' || *src == L'\n')) src++;
-    if (stripMarkdown) {
-        while (*src == L'#' || *src == L'>' || *src == L'-' || *src == L'*' || *src == L'+' || *src == L' ') src++;
-        while (*src >= L'0' && *src <= L'9') src++;
-        if (*src == L'.' || *src == L')') src++;
-        while (*src == L' ' || *src == L'\t') src++;
-    }
-
-    for (; *src && (dst - s) < 240; ++src) {
-        wchar_t ch = *src;
-        if (ch == L'\r' || ch == L'\n' || ch == L'\t' || ch == L' ') {
-            pendingSpace = 1;
-            continue;
-        }
-        if (stripMarkdown && (ch == L'*' || ch == L'_' || ch == L'`' ||
-            ch == L'~' || ch == L'[' || ch == L']')) {
-            continue;
-        }
-        if (pendingSpace && dst > s) *dst++ = L' ';
-        pendingSpace = 0;
-        *dst++ = ch;
-    }
-    while (dst > s && dst[-1] == L' ') dst--;
-    *dst = 0;
-
-    len = wcslen(s);
-    return len >= 2;
-}
-
 static void set_edit_char_at_y(HWND hEdit, int charIndex, int y) {
     int lineHeight;
     int i;
@@ -980,51 +879,6 @@ static void set_edit_line_at_y(HWND hEdit, int line, int y) {
     set_edit_char_at_y(hEdit, charIndex, y);
 }
 
-static int find_text_in_edit_at_y(HWND hEdit, const wchar_t* text, int y) {
-    FINDTEXTEXW ft;
-    int pos;
-    if (!hEdit || !text || !text[0]) return 0;
-    ZeroMemory(&ft, sizeof(ft));
-    ft.chrg.cpMin = 0;
-    ft.chrg.cpMax = -1;
-    ft.lpstrText = (wchar_t*)text;
-    pos = (int)SendMessageW(hEdit, EM_FINDTEXTEXW, FR_DOWN, (LPARAM)&ft);
-    if (pos < 0) return 0;
-    set_edit_char_at_y(hEdit, pos, y);
-    return 1;
-}
-
-static int find_text_in_edit_near_line_at_y(HWND hEdit, const wchar_t* text, int line, int y) {
-    FINDTEXTEXW ft;
-    int targetChar;
-    int best = -1;
-    int bestDist = 2147483647;
-    if (!hEdit || !text || !text[0]) return 0;
-    if (line < 0) return find_text_in_edit_at_y(hEdit, text, y);
-
-    targetChar = (int)SendMessageW(hEdit, EM_LINEINDEX, (WPARAM)line, 0);
-    if (targetChar < 0) targetChar = 0;
-
-    ZeroMemory(&ft, sizeof(ft));
-    ft.chrg.cpMin = 0;
-    ft.chrg.cpMax = -1;
-    ft.lpstrText = (wchar_t*)text;
-    while (SendMessageW(hEdit, EM_FINDTEXTEXW, FR_DOWN, (LPARAM)&ft) >= 0) {
-        int found = ft.chrgText.cpMin;
-        int dist = found >= targetChar ? found - targetChar : targetChar - found;
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = found;
-        }
-        ft.chrg.cpMin = ft.chrgText.cpMin + 1;
-        ft.chrg.cpMax = -1;
-    }
-
-    if (best < 0) return 0;
-    set_edit_char_at_y(hEdit, best, y);
-    return 1;
-}
-
 static void sync_edit_commander_to_html(MDViewData* d, int line, int y) {
     if (!d || !d->splitView || !d->hwndText || line < 0) return;
     if (y < 0) y = 0;
@@ -1035,69 +889,6 @@ static void sync_edit_commander_to_html(MDViewData* d, int line, int y) {
     d->syncGuard = 0;
 }
 
-static int scroll_html_to_text_near_line(MDViewData* d, const wchar_t* text, int line) {
-    wchar_t esc[512];
-    wchar_t js[2200];
-    char title[64];
-    size_t oi = 0;
-    const wchar_t* p;
-    int ok = 0;
-    if (!d || !d->pBrowser || !text || !text[0]) return 0;
-
-    for (p = text; *p && oi + 2 < _countof(esc); ++p) {
-        if (*p == L'\\' || *p == L'\'') esc[oi++] = L'\\';
-        if (*p == L'\r' || *p == L'\n' || *p == L'\t') { esc[oi++] = L' '; continue; }
-        esc[oi++] = *p;
-    }
-    esc[oi] = 0;
-
-    _snwprintf_s(js, _countof(js), _TRUNCATE,
-        L"(function(){var txt='%s',line=%d,ct=document.getElementById('mdv-ct'),"
-        L"w,n,raw,hay,needle,best=null,bestLine=-1,bestD=2147483647,ln,d,target,anchor;"
-        L"function norm(s){return String(s||'').replace(/\\s+/g,' ').replace(/^\\s+|\\s+$/g,'');}"
-        L"if(!ct||!txt){document.title='MDVSYNC:0';return;}"
-        L"needle=norm(txt).toLowerCase();"
-        L"w=document.createTreeWalker?document.createTreeWalker(ct,4,null,false):mdvTextWalker(ct);"
-        L"while(w.nextNode()){n=w.currentNode;if(!n||!n.nodeValue)continue;"
-        L"raw=norm(n.nodeValue);hay=raw.toLowerCase();if(hay.indexOf(needle)<0)continue;"
-        L"ln=(window.mdvElementLine&&n.parentNode)?mdvElementLine(n.parentNode):-1;"
-        L"d=(ln>=0&&line>=0)?Math.abs(ln-line):999999;"
-        L"if(!best||d<bestD||(d===bestD&&ln>=line&&bestLine<line)){best=n;bestLine=ln;bestD=d;}}"
-        L"if(best){target=best.parentNode;anchor=(bestLine>=0&&window.mdvFindLineAnchor)?mdvFindLineAnchor(bestLine):target;"
-        L"mdvScrollElToTop(anchor||target,8);document.title='MDVSYNC:1';}"
-        L"else document.title='MDVSYNC:0';})();",
-        esc, line);
-    exec_js(d->pBrowser, js);
-    if (get_document_title_utf8(d->pBrowser, title, (int)sizeof(title)) &&
-        sscanf_s(title, "MDVSYNC:%d", &ok) == 1) {
-        return ok != 0;
-    }
-    return 0;
-}
-
-static int sync_edit_selection_to_html(MDViewData* d) {
-    wchar_t* phrase;
-    int line;
-    int ok;
-    if (!d || !d->splitView || !d->hwndText || !d->pBrowser) return 0;
-    line = get_edit_selection_start_line(d->hwndText);
-    phrase = get_edit_selection_text_dup(d->hwndText);
-    if (!phrase) return 0;
-    if (!prepare_sync_phrase_w(phrase, 1)) {
-        free(phrase);
-        return 0;
-    }
-    d->syncGuard = 1;
-    ok = scroll_html_to_text_near_line(d, phrase, line);
-    if (ok) {
-        d->lastEditLine = get_edit_top_line(d->hwndText);
-        d->lastHtmlLine = get_html_top_line(d);
-    }
-    d->syncGuard = 0;
-    free(phrase);
-    return ok;
-}
-
 static void sync_html_commander_to_edit(MDViewData* d, int line, int y) {
     if (!d || !d->splitView || !d->hwndText || line < 0) return;
     if (y < 0) y = 0;
@@ -1106,33 +897,6 @@ static void sync_html_commander_to_edit(MDViewData* d, int line, int y) {
     d->lastHtmlLine = line;
     d->lastEditLine = get_edit_top_line(d->hwndText);
     d->syncGuard = 0;
-}
-
-static int sync_html_selection_to_edit(MDViewData* d) {
-    char* utf8;
-    wchar_t* phrase;
-    int line;
-    int ok;
-    if (!d || !d->splitView || !d->hwndText || !d->pBrowser) return 0;
-    line = get_html_selection_line(d);
-    utf8 = get_html_selection_text_utf8_dup(d);
-    if (!utf8) return 0;
-    phrase = utf8_to_wide_dup(utf8);
-    free(utf8);
-    if (!phrase) return 0;
-    if (!prepare_sync_phrase_w(phrase, 0)) {
-        free(phrase);
-        return 0;
-    }
-    d->syncGuard = 1;
-    ok = find_text_in_edit_near_line_at_y(d->hwndText, phrase, line, 8);
-    if (ok) {
-        d->lastHtmlLine = get_html_top_line(d);
-        d->lastEditLine = get_edit_top_line(d->hwndText);
-    }
-    d->syncGuard = 0;
-    free(phrase);
-    return ok;
 }
 
 static void sync_html_to_edit(MDViewData* d) {
@@ -1298,6 +1062,15 @@ static int get_html_state(MDViewData* d, MDViewHtmlState* st) {
         &st->hasMatches, &st->editableActive) == 9;
 }
 
+static void close_html_overlays(MDViewData* d) {
+    if (!d || !d->pBrowser) return;
+    exec_js(d->pBrowser,
+        L"(function(){var toc=document.getElementById('mdv-toc'),h=document.getElementById('mdv-help');"
+        L"if(typeof hf==='function')hf();"
+        L"else{var fb=document.getElementById('mdv-fb');if(fb)fb.className='';if(typeof cf==='function')cf();}"
+        L"if(toc)toc.className='';if(document.body)document.body.style.marginRight='0';if(h)h.className='';})();");
+}
+
 static HWND get_root_parent(HWND hwnd) {
     HWND w = hwnd;
     while (w) {
@@ -1400,10 +1173,7 @@ static LRESULT CALLBACK TextViewSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
         if (wP == VK_ESCAPE) {
             MDViewHtmlState st;
             if (get_html_state(d, &st) && (st.findVisible || st.tocVisible || st.helpVisible)) {
-                exec_js(d->pBrowser,
-                    L"(function(){var fb=document.getElementById('mdv-fb'),toc=document.getElementById('mdv-toc'),h=document.getElementById('mdv-help');"
-                    L"if(fb)fb.className='';if(toc)toc.className='';if(document.body)document.body.style.marginRight='0';if(h)h.className='';"
-                    L"if(typeof cf==='function')cf();})();");
+                close_html_overlays(d);
                 return 0;
             }
             HWND w = hwnd;
@@ -1720,10 +1490,7 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
         /* Escape: the IE control eats it, so forward to TC's lister parent */
         if (wP == VK_ESCAPE) {
             if (hasState && (st.findVisible || st.tocVisible || st.helpVisible)) {
-                exec_js(d->pBrowser,
-                    L"(function(){var fb=document.getElementById('mdv-fb'),toc=document.getElementById('mdv-toc'),h=document.getElementById('mdv-help');"
-                    L"if(fb)fb.className='';if(toc)toc.className='';if(document.body)document.body.style.marginRight='0';if(h)h.className='';"
-                    L"if(typeof cf==='function')cf();})();");
+                close_html_overlays(d);
                 return 0;
             }
             HWND parent = GetParent(GetParent(GetParent(hwnd))); /* IE_Server -> Shell DocObj -> Shell Embed -> our container -> TC lister */
@@ -3655,15 +3422,6 @@ static const char* get_ui(void) {
     #define LC_NEWPARAMS   2
     #define LC_SELECT_ALL  3
     #define LC_SETPERCENT  4
-
-    #define LCP_WRAPTEXT      1
-    #define LCP_FITTOWINDOW   2
-    #define LCP_ANSI          4
-    #define LCP_ASCII         8
-    #define LCP_VARIABLE      12
-    #define LCP_FORCESHOW     16
-    #define LCP_FITLARGERONLY 32
-    #define LCP_CENTER        64
 #endif
 
 static void js_find_apply(MDViewData* d, const wchar_t* needle, int matchCase, int wholeWords) {
@@ -3914,9 +3672,7 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
         if (d && d->splitView && d->hwndText && (HWND)lP == d->hwndText &&
             (HIWORD(wP) == EN_VSCROLL || HIWORD(wP) == EN_HSCROLL)) {
             d->syncLeader = MDVIEW_SYNC_EDIT;
-            /* The raw control subclass owns live scroll synchronisation. RichEdit
-               can also emit EN_VSCROLL after programmatic pixel-scroll moves used
-               by hard sync; re-syncing here can undo Ctrl+Y/selection alignment. */
+            /* Keep scroll persistence independent from explicit Ctrl+Y sync. */
             if (!d->syncGuard) remember_split_scroll_positions(d);
             return 0;
         }
