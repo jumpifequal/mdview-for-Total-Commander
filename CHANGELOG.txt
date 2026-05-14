@@ -1,3 +1,10 @@
+v3.8
+- change: split view now uses two MSHTML panes in one viewer document instead of mixing MSHTML rendering with a separate RichEdit raw control
+- fix: Ctrl+Y, double-click, and the split-view context sync command now use line/signature anchors shared by the rendered and raw panes for more reliable alignment on image-heavy Markdown files
+- fix: raw-view copy preserves Markdown line breaks for both Ctrl+A/Ctrl+C and mouse-selection/Ctrl+C clipboard paths
+- fix: split-view text selection is constrained to the pane where the drag starts, avoiding accidental cross-pane selection
+- docs: README and package metadata updated for the 3.8 release
+
 v3.7
 - add: double-clicking either split-view pane now runs the same explicit pane alignment command as Ctrl+Y
 - change: split-view scrolling is stable and independent by default; Ctrl+Y and the context-menu sync command remain the explicit best-effort alignment actions

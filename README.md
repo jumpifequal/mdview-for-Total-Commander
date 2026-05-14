@@ -1,4 +1,4 @@
-# MDView 3.7
+# MDView 3.8
 
 **A Markdown viewer plugin for Total Commander.**
 
@@ -52,10 +52,10 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Safe link opening** - linked Markdown files open inside MDView instead of blanking the embedded browser; other links are handed off to Windows
 - **YAML front matter rendering** - top-of-file `--- ... ---` metadata blocks in SKILL-style documents render as highlighted YAML instead of ordinary paragraph text
 - **Split view** - rendered Markdown alongside the raw Markdown source with `Ctrl+M`
-- **Raw Markdown viewer** - implemented with the Windows RichEdit control using a configurable monospace font
+- **Raw Markdown viewer** - implemented as a second MSHTML pane using the same viewer document, with a configurable monospace font
 - **Character count with spaces** - both rendered and raw views show a character count aligned to a Word-like convention that excludes line breaks
 - **Split-view positioning** - rendered HTML and raw Markdown panes keep independent scroll positions so manual reading does not jump unexpectedly
-- **Manual split-view alignment** - use `Ctrl+Y` or the `Sync panes here` context-menu command for best-effort source-line alignment from the focused pane
+- **Manual split-view alignment** - use `Ctrl+Y`, double click, or the `Sync panes here` context-menu command for source-line alignment from the focused pane
 - **Smart clipboard behaviour**
   - Copy from rendered view -> formatted HTML + plain text
   - Copy from raw view -> original Markdown text
@@ -115,7 +115,7 @@ Press `F1` inside the viewer for an on-screen reference.
 
 ## Version
 
-Current release: **MDView 3.7**
+Current release: **MDView 3.8**
 
 ## Download
 
@@ -152,7 +152,7 @@ For embedded-image regression reference, use `Sample_md_files\file_with_embedded
 
 The plugin is implemented in a single C source file and can be built natively on Windows with MSVC.
 
-The raw Markdown view uses the built-in **RichEdit (Msftedit.dll)** control available on modern Windows systems.
+The raw Markdown view is rendered inside the embedded MSHTML document as a synchronized source pane, so split view uses a single browser document instead of a separate RichEdit control.
 
 Visual Studio configurations:
 
