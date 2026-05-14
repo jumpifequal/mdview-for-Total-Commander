@@ -21,19 +21,19 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 
 | Light Mode                                | Dark Mode                               |
 | ----------------------------------------- | --------------------------------------- |
-| ![Light mode](screenshots/light-mode.png) | ![Dark mode](screenshots/dark-mode.png) |
+| ![Light mode](Screenshots/light-mode.png) | ![Dark mode](Screenshots/dark-mode.png) |
 
 | Split View                                | Table of Contents                     |
 | ----------------------------------------- | ------------------------------------- |
-| ![Split view](screenshots/split-view.png) | ![TOC view](screenshots/toc-view.png) |
+| ![Split view](Screenshots/split-view.png) | ![TOC view](Screenshots/toc-view.png) |
 
 | Help View                               | Mermaid Rendering 1                                         |
 | --------------------------------------- | ----------------------------------------------------------- |
-| ![Help view](screenshots/help-view.png) | ![Mermaid rendering 1](screenshots/mermaid-rendering-1.png) |
+| ![Help view](Screenshots/help-view.png) | ![Mermaid rendering 1](Screenshots/mermaid-rendering-1.png) |
 
 | Mermaid Rendering 2                                         | Mermaid Rendering 3                                         |
 | ----------------------------------------------------------- | ----------------------------------------------------------- |
-| ![Mermaid rendering 2](screenshots/mermaid-rendering-2.png) | ![Mermaid rendering 3](screenshots/mermaid-rendering-3.png) |
+| ![Mermaid rendering 2](Screenshots/mermaid-rendering-2.png) | ![Mermaid rendering 3](Screenshots/mermaid-rendering-3.png) |
 
 ## Features
 
