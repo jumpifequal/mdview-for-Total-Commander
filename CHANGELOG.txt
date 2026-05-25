@@ -1,3 +1,7 @@
+v3.8.1
+- fix: compact changelog-style lines such as -add: and -change: retain visible line breaks without changing standard Markdown list parsing
+- docs: README and package metadata updated for the 3.8.1 release
+
 v3.8
 - change: split view now uses two MSHTML panes in one viewer document instead of mixing MSHTML rendering with a separate RichEdit raw control
 - fix: Ctrl+Y, double-click, and the split-view context sync command now use line/signature anchors shared by the rendered and raw panes for more reliable alignment on image-heavy Markdown files

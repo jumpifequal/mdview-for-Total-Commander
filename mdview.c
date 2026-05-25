@@ -1,5 +1,5 @@
 /*
- * MDView v3.8 - Total Commander Lister Plugin for Markdown
+ * MDView v3.8.1 - Total Commander Lister Plugin for Markdown
  * =========================================================
  * Lightweight WLX plugin: built-in Markdown->HTML, embedded MSHTML, zero deps.
  *
@@ -1823,6 +1823,12 @@ static int get_indent(const char* l) { int n=0; while(l[n]==' ')n++; if(l[n]=='\
 static int is_ul(const char* t) { return(t[0]=='-'||t[0]=='*'||t[0]=='+')&&t[1]==' '; }
 static int is_ol(const char* t) { int i=0; while(t[i]>='0'&&t[i]<='9')i++; if(i==0||i>9)return 0; if((t[i]=='.'||t[i]==')')&&t[i+1]==' ')return i+2; return 0; }
 static int is_dash_separator(const char* t) { int n=0; while(*t==' ')t++; while(*t=='-'){n++;t++;} while(*t==' ')t++; return n>=2&&*t=='\0'; }
+static int is_compact_changelog_entry(const char* t) {
+    const char* p = t;
+    if (!p || *p++ != '-' || !((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z'))) return 0;
+    while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) p++;
+    return *p == ':';
+}
 
 static int is_same_level_list_line(const Lines* lines, int idx, int baseIndent, int ordered) {
     const char* l;
@@ -2102,16 +2108,20 @@ static char* md_to_html(const char* markdown, const char* currentFile) {
 
         /* Paragraph */
         { StrBuf para; int paraLine = i; sb_init(&para);
+            int previousCompactEntry = 0;
             while(i<lines.count){
                 const char* pl=lines.lines[i]; int pi=get_indent(pl); const char* pt=pl+pi;
+                int compactEntry;
                 if(pt[0]=='\0')break; if(pt[0]=='#'&&pt[1]==' ')break; if(is_hr(pl))break;
                 if(pt[0]=='>'&&(pt[1]==' '||pt[1]=='\0'))break;
                 if(strncmp(pt,"```",3)==0||strncmp(pt,"~~~",3)==0)break;
                 if(_strnicmp(pt,"<details",8)==0)break;
                 if(is_ul(pt)||is_ol(pt))break;
                 if(i+1<lines.count&&is_table_sep(lines.lines[i+1]))break;
-                if(para.len>0) sb_append(&para,"\n");
+                compactEntry = is_compact_changelog_entry(pt);
+                if(para.len>0) sb_append(&para, previousCompactEntry && compactEntry ? "  \n" : "\n");
                 sb_append(&para,tr); i++;
+                previousCompactEntry = compactEntry;
                 if(i<lines.count){ const char* nx=lines.lines[i]; while(*nx==' ')nx++; int nl2=(int)strlen(nx);
                     if(nl2>=1){int ae=1,ad=1;for(int j=0;j<nl2;j++){if(nx[j]!='=')ae=0;if(nx[j]!='-')ad=0;}if(ae||ad)break;}
                     pi=get_indent(lines.lines[i]); tr=lines.lines[i]+pi;
@@ -3164,7 +3174,7 @@ static const char* get_ui(void) {
     "<div class=\"hrow\"><span>This help</span><span class=\"hkeys\"><span class=\"kc\">F1</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
-    "<div class=\"help-foot\">MDView v3.8 &middot; Settings auto-saved &middot; Press Esc to close</div>"
+    "<div class=\"help-foot\">MDView v3.8.1 &middot; Settings auto-saved &middot; Press Esc to close</div>"
     "</div>";
 }
 

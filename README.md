@@ -1,4 +1,4 @@
-# MDView 3.8
+# MDView 3.8.1
 
 **A Markdown viewer plugin for Total Commander.**
 
@@ -51,6 +51,7 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Relative link handling** - local Markdown links and images resolve correctly against the current document, including `./`, `../`, nested paths, and `#fragment` suffixes
 - **Safe link opening** - linked Markdown files open inside MDView instead of blanking the embedded browser; other links are handed off to Windows
 - **YAML front matter rendering** - top-of-file `--- ... ---` metadata blocks in SKILL-style documents render as highlighted YAML instead of ordinary paragraph text
+- **Compact changelog readability** - consecutive plain-text entries such as `-add:` and `-fix:` retain visible line breaks in rendered documents
 - **Split view** - rendered Markdown alongside the raw Markdown source with `Ctrl+M`
 - **Raw Markdown viewer** - implemented as a second MSHTML pane using the same viewer document, with a configurable monospace font
 - **Character count with spaces** - both rendered and raw views show a character count aligned to a Word-like convention that excludes line breaks
@@ -115,7 +116,7 @@ Press `F1` inside the viewer for an on-screen reference.
 
 ## Version
 
-Current release: **MDView 3.8**
+Current release: **MDView 3.8.1**
 
 ## Download
 
@@ -180,6 +181,7 @@ MDView intentionally implements a pragmatic Markdown subset rather than a full C
 - **Mermaid support is intentionally partial.** Supported diagram families are `graph` / `flowchart`, `sequenceDiagram`, `classDiagram`, `stateDiagram`, and `stateDiagram-v2`. Other Mermaid syntaxes fall back to the original source block.
 - **Mermaid on Windows XP is disabled.** XP builds show Mermaid source blocks instead of rendered diagrams for stability.
 - **Directives such as `[TOC]` and footnotes are not fully implemented.** They may render as ordinary text rather than as generated navigation or note structures.
+- **Compact changelog entries are a readability extension.** Lines such as `-add:` and `-fix:` render on separate lines when consecutive; use standard `- item` syntax when portable Markdown list semantics are required.
 - **The parser is not a full spec-compliance engine.** Edge cases involving deeply nested emphasis, exotic HTML/Markdown interactions, or advanced extension syntax may differ from CommonMark/GFM behavior.
 
 ## File List
