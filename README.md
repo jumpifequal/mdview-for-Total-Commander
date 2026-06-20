@@ -1,4 +1,4 @@
-# MDView 3.8.1
+# MDView 3.8.2
 
 **A Markdown viewer plugin for Total Commander.**
 
@@ -43,12 +43,13 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **Consistent Mermaid typography** - supported Mermaid diagrams follow the active viewer font family and font size from MDView settings
 - **Emoji shortcode support** - a curated set of common shortcodes such as `:smile:`, `:heart:`, `:+1:`, `:rocket:`, `:warning:`, `:white_check_mark:`, and similar everyday aliases
 - **Dark / light mode** - toggle with `Ctrl+D`, or auto-detected from the Windows theme on first launch
-- **Adjustable layout** - zoom in and out, with content fit to the Lister window
+- **Adjustable layout** - zoom in and out with keyboard shortcuts or `Ctrl+MouseWheel`, with content fit to the Lister window
 - **Line numbers** - toggle on code blocks with `Ctrl+L`
 - **Table of Contents** - auto-generated sidebar from headings
 - **Find in page** - compact advanced search with match highlighting, whole-word, case-sensitive, live search, and optional explicit start-search mode
 - **Tooltip on links** - hovering a link shows the resolved target URL
 - **Relative link handling** - local Markdown links and images resolve correctly against the current document, including `./`, `../`, nested paths, and `#fragment` suffixes
+- **Full character filename support** - Markdown files whose names contain accented, symbolic, or non-ASCII characters open through the Unicode Windows file API instead of falling back to Total Commander's plain-text viewer
 - **Safe link opening** - linked Markdown files open inside MDView instead of blanking the embedded browser; other links are handed off to Windows
 - **YAML front matter rendering** - top-of-file `--- ... ---` metadata blocks in SKILL-style documents render as highlighted YAML instead of ordinary paragraph text
 - **Compact changelog readability** - consecutive plain-text entries such as `-add:` and `-fix:` retain visible line breaks in rendered documents
@@ -95,6 +96,7 @@ For the dedicated Windows XP build, Mermaid blocks fall back to the original sou
 | ------------------ | --------------------------------- |
 | `Ctrl` `+`         | Zoom in                           |
 | `Ctrl` `-`         | Zoom out                          |
+| `Ctrl` `MouseWheel`| Zoom in / out                     |
 | `Ctrl` `0`         | Reset zoom                        |
 | `Ctrl` `D`         | Toggle dark / light mode          |
 | `Ctrl` `L`         | Toggle line numbers               |
@@ -116,7 +118,7 @@ Press `F1` inside the viewer for an on-screen reference.
 
 ## Version
 
-Current release: **MDView 3.8.1**
+Current release: **MDView 3.8.2**
 
 ## Download
 
@@ -145,6 +147,8 @@ For Mermaid validation, use `test_mermaid.md`. It covers the Mermaid diagram fam
 
 For relative-link and front-matter regression checks, use `Sample_md_files\readme_problematic.md` and `Sample_md_files\SKILL.md`.
 
+For filename regression checks, MDView includes local-only full-character filename coverage in the development samples. Distribution ZIPs intentionally keep the packaged sample filenames simple.
+
 For collapsible-section regression checks, use `Sample_md_files\markdown_en.md`.
 
 For embedded-image regression reference, use `Sample_md_files\file_with_embedded_image.md` to verify the current unsupported case documented below.
@@ -167,7 +171,7 @@ The project also includes `resource.rc` and `resource.h`, so the Win32, x64, and
 
 ## How It Works
 
-MDView is a WLX lister plugin that Total Commander loads when you press `F3` on a matching file type. It contains a built-in Markdown-to-HTML converter and embeds an MSHTML WebBrowser control to render the output. Keyboard input is handled by subclassing the browser's internal window, giving reliable hotkey interception without interfering with normal scrolling or Total Commander key handling. The OLE control and its child window hierarchy are resized via `IOleInPlaceObject::SetObjectRects` and `MoveWindow` so the viewer fills the lister window at any size. Settings are persisted via the standard Total Commander INI mechanism.
+MDView is a WLX lister plugin that Total Commander loads when you press `F3` on a matching file type. The Unicode `ListLoadW` entry point converts the incoming Windows path to the plugin's internal UTF-8 path representation; file reads convert that UTF-8 path back to UTF-16 and use `_wfopen`, so accented filenames are opened by the Windows Unicode API. It contains a built-in Markdown-to-HTML converter and embeds an MSHTML WebBrowser control to render the output. Keyboard input is handled by subclassing the browser's internal window, giving reliable hotkey interception without interfering with normal scrolling or Total Commander key handling. The OLE control and its child window hierarchy are resized via `IOleInPlaceObject::SetObjectRects` and `MoveWindow` so the viewer fills the lister window at any size. Settings are persisted via the standard Total Commander INI mechanism.
 
 ## Known Limitations
 

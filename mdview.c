@@ -1,10 +1,11 @@
 /*
- * MDView v3.8.1 - Total Commander Lister Plugin for Markdown
+ * MDView v3.8.2 - Total Commander Lister Plugin for Markdown
  * =========================================================
  * Lightweight WLX plugin: built-in Markdown->HTML, embedded MSHTML, zero deps.
  *
  * Hotkeys:
  *   Ctrl+Plus/Minus/0  Zoom in / out / reset
+ *   Ctrl+MouseWheel    Zoom in / out
  *   Ctrl+D             Toggle dark/light mode
  *   Ctrl+T             Toggle Table of Contents sidebar
  *   Ctrl+F             Find in page with highlighting
@@ -64,7 +65,7 @@
 #include <string.h>
 #include <ctype.h>
 
-/* ── TC Lister Plugin Interface ──────────────────────────────────────── */
+/* --- TC Lister Plugin Interface --- */
 
 #define LISTPLUGIN_OK    0
 #define LISTPLUGIN_ERROR 1
@@ -105,6 +106,7 @@ struct MDViewData {
     WNDPROC       origIEProc;    /* Original wndproc of IE Server */
     HWND          hwndContainer; /* Our container window */
     int           splitView;     /* 0/1 */
+    int           ctrlWheelRemainder; /* Accumulates high-resolution Ctrl+wheel zoom deltas */
     size_t        rawCharCount;  /* UTF-8 codepoint count for raw markdown */
     char*         mdUtf8;        /* raw markdown (UTF-8), owned */
     char*         currentFile;   /* current file path (UTF-8), owned */
@@ -116,7 +118,7 @@ static void js_find_apply(MDViewData*, const wchar_t*, int, int);
 #define MDVIEW_SYNC_TIMER_ID 1
 #define MDVIEW_SYNC_TIMER_MS 120
 
-/* ── INI Settings Persistence ────────────────────────────────────────── */
+/* --- INI Settings Persistence --- */
 
 static char g_iniPath[MAX_PATH] = { 0 };
 
@@ -183,7 +185,7 @@ static LONG_PTR mdview_get_window_ptr(HWND hwnd, int index) {
 
 /* Execute JavaScript on the browser document */
 
-/* ── OLE command helper (copy/paste) ─────────────────────────────────── */
+/* --- OLE command helper (copy/paste) --- */
 
 static void browser_exec_olecmd(IWebBrowser2* pBrowser, OLECMDID cmd) {
     if (!pBrowser) return;
@@ -566,7 +568,7 @@ clear:
     exec_js(d->pBrowser, L"document.title='MDView';");
 }
 
-/* ── Split-view scroll and source-line sync helpers ───────────────────── */
+/* --- Split-view scroll and source-line sync helpers --- */
 
 static void sync_panes_here(MDViewData* d) {
     if (!d || !d->pBrowser) return;
@@ -799,6 +801,22 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
     MDViewData* d = (MDViewData*)GetPropW(hwnd, L"MDViewData");
     if (!d) return DefWindowProcW(hwnd, msg, wP, lP);
 
+    if (msg == WM_MOUSEWHEEL) {
+        if (GetKeyState(VK_CONTROL) & 0x8000) {
+            int delta = GET_WHEEL_DELTA_WPARAM(wP);
+            d->ctrlWheelRemainder += delta;
+            while (d->ctrlWheelRemainder >= WHEEL_DELTA) {
+                exec_js(d->pBrowser, L"zi()");
+                d->ctrlWheelRemainder -= WHEEL_DELTA;
+            }
+            while (d->ctrlWheelRemainder <= -WHEEL_DELTA) {
+                exec_js(d->pBrowser, L"zo()");
+                d->ctrlWheelRemainder += WHEEL_DELTA;
+            }
+            return 0;
+        }
+        d->ctrlWheelRemainder = 0;
+    }
     if (msg == WM_KEYDOWN) {
         MDViewHtmlState st;
         int hasState = get_html_state(d, &st);
@@ -904,7 +922,7 @@ static LRESULT CALLBACK IEServerSubclassProc(HWND hwnd, UINT msg, WPARAM wP, LPA
     }
 }
 
-/* ── Minimal COM Site Implementation ─────────────────────────────────── */
+/* --- Minimal COM Site Implementation --- */
 
 typedef struct SiteImpl {
     IOleClientSite    clientSite;
@@ -1009,7 +1027,7 @@ static SiteImpl* CreateSiteImpl(HWND hwnd) {
     return s;
 }
 
-/* ── String Buffer ───────────────────────────────────────────────────── */
+/* --- String Buffer --- */
 
 typedef struct { char* data; size_t len; size_t cap; } StrBuf;
 
@@ -1387,7 +1405,7 @@ static const char* lookup_emoji_shortcode(const char* shortcode, size_t len) {
     return NULL;
 }
 
-/* ── Markdown Inline Parser ──────────────────────────────────────────── */
+/* --- Markdown Inline Parser --- */
 
 typedef struct {
     char* label;
@@ -1737,7 +1755,7 @@ static void parse_inline(StrBuf* sb, const char* t, size_t len, const char* curr
     }
 }
 
-/* ── Markdown Block Parser Helpers ───────────────────────────────────── */
+/* --- Markdown Block Parser Helpers --- */
 
 static int count_leading(const char* l, char c) { int n=0; while(l[n]==c)n++; return n; }
 typedef struct { char** lines; int count; } Lines;
@@ -1842,7 +1860,7 @@ static int is_same_level_list_line(const Lines* lines, int idx, int baseIndent, 
     return ordered ? (is_ol(t) != 0) : is_ul(t);
 }
 
-/* ── Markdown Block Parser ───────────────────────────────────────────── */
+/* --- Markdown Block Parser --- */
 
 static void sb_append_line_attr(StrBuf* sb, int line) {
     char tmp[48];
@@ -2136,7 +2154,7 @@ static char* md_to_html(const char* markdown, const char* currentFile) {
     return sb.data;
 }
 
-/* ── Theme Detection ─────────────────────────────────────────────────── */
+/* --- Theme Detection --- */
 
 static char* md_to_raw_html(const char* markdown) {
     StrBuf sb;
@@ -2171,14 +2189,14 @@ static int is_dark_theme(void) {
 #endif
 }
 
-/* ── CSS ─────────────────────────────────────────────────────────────── */
+/* --- CSS --- */
 
 static void build_css(StrBuf* sb) {
     sb_append(sb,
     "*{box-sizing:border-box}"
     "html{background:#fff;min-height:100%;width:100%}");
 
-    /* Body — full viewport background */
+    /* Body - full viewport background */
     sb_append(sb, "body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;");
     { char tmp[64]; _snprintf(tmp, sizeof(tmp), "font-size:%dpx;", g_settings.fontSize); sb_append(sb, tmp); }
     sb_append(sb, "line-height:1.7;color:#24292e;background:#fff;margin:0;padding:0;"
@@ -2211,7 +2229,7 @@ static void build_css(StrBuf* sb) {
     "body.mdv-split{overflow:visible}body.mdv-split #mdv-layout{display:block;height:auto}"
     "body.mdv-split #mdv-render-pane{height:auto;overflow:visible;border-right:0}}");
 
-    /* Content container — centered, optional max-width */
+    /* Content container - centered, optional max-width */
     sb_append(sb, "#mdv-ct{margin:0 auto;padding:12px 32px 24px;");
     if (g_settings.maxWidth > 0) {
         char tmp[64]; sprintf_s(tmp, sizeof(tmp), "max-width:%dpx;", g_settings.maxWidth); sb_append(sb, tmp);
@@ -2429,7 +2447,7 @@ static void build_css(StrBuf* sb) {
     );
 }
 
-/* ── JavaScript ──────────────────────────────────────────────────────── */
+/* --- JavaScript --- */
 
 static void build_js(StrBuf* sb) {
     /* Initial values from settings */
@@ -2769,7 +2787,7 @@ static void build_js(StrBuf* sb) {
     "if(sh>0)b.style.width=(st/sh*100)+'%';else b.style.width='0'}"
     "window.onscroll=up;"
 
-    /* Syntax highlighting — regex-based, applied once on load */
+    /* Syntax highlighting - regex-based, applied once on load */
     "function shAll(){"
     "var pres=mdvQSA(document,'pre code[class]');"
     "for(var i=0;i<pres.length;i++){var el=pres[i],cls=el.className||'';"
@@ -2843,7 +2861,7 @@ static void build_js(StrBuf* sb) {
     "b.parentNode.insertBefore(btn,b.nextSibling);"
     "}}}"
 
-    /* Keyboard handler (backup — primary interception is via IE subclass) */
+    /* Keyboard handler (backup - primary interception is via IE subclass) */
     "function mdvSupportsDetails(){var d=document.createElement?document.createElement('details'):null;return !!(d&&typeof d.open!=='undefined')}"
     "function mdvSetDetailsState(d,open){var i,n,seen=0;if(!d)return;for(i=0;i<d.childNodes.length;i++){n=d.childNodes[i];if(n.nodeType===1&&n.tagName==='SUMMARY'){seen=1;continue;}if(!seen)continue;if(n.nodeType===1)n.style.display=open?'':'none';}if(open){if(d.setAttribute)d.setAttribute('open','open');else d.open=true;}else{if(d.removeAttribute)d.removeAttribute('open');else d.open=false;}}"
     "function initDetailsFallback(){var ds,i,d,ss,s,open;"
@@ -3116,7 +3134,7 @@ static void build_js(StrBuf* sb) {
     "</script>");
 }
 
-/* ── HTML UI elements ────────────────────────────────────────────────── */
+/* --- HTML UI elements --- */
 
 static const char* get_ui(void) {
     return
@@ -3149,6 +3167,7 @@ static const char* get_ui(void) {
     "<div class=\"hrow\"><span>Copy to Clipboard</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">C</span></span></div>"
     "<div class=\"hrow\"><span>Zoom in</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">+</span></span></div>"
     "<div class=\"hrow\"><span>Zoom out</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">&minus;</span></span></div>"
+    "<div class=\"hrow\"><span>Zoom with mouse wheel</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">Wheel</span></span></div>"
     "<div class=\"hrow\"><span>Reset zoom</span><span class=\"hkeys\"><span class=\"kc\">Ctrl</span><span class=\"kc-plus\">+</span><span class=\"kc\">0</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
@@ -3174,11 +3193,11 @@ static const char* get_ui(void) {
     "<div class=\"hrow\"><span>This help</span><span class=\"hkeys\"><span class=\"kc\">F1</span></span></div>"
     "<div class=\"help-sep\"></div>"
 
-    "<div class=\"help-foot\">MDView v3.8.1 &middot; Settings auto-saved &middot; Press Esc to close</div>"
+    "<div class=\"help-foot\">MDView v3.8.2 &middot; Settings auto-saved &middot; Press Esc to close</div>"
     "</div>";
 }
 
-/* ── Lister search integration (Ctrl+F / F3 / Shift+F3) ─────────────── */
+/* --- Lister search integration (Ctrl+F / F3 / Shift+F3) --- */
 
 /* WLX SDK search flags (ListSearchText searchParameter) */
 #ifndef LCS_FINDFIRST
@@ -3233,10 +3252,31 @@ static void js_find_step(MDViewData* d, int backwards) {
     exec_js(d->pBrowser, backwards ? L"fp()" : L"fn()" );
 }
 
-/* ── File Reading ────────────────────────────────────────────────────── */
+/* --- File Reading --- */
+
+static FILE* open_utf8_path_rb(const char* fn) {
+    FILE* f = NULL;
+    wchar_t* wfn = NULL;
+    int wl;
+
+    if (!fn) return NULL;
+
+    wl = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, fn, -1, NULL, 0);
+    if (wl > 0) {
+        wfn = (wchar_t*)calloc((size_t)wl, sizeof(wchar_t));
+        if (wfn) {
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, fn, -1, wfn, wl) > 0)
+                f = _wfopen(wfn, L"rb");
+            free(wfn);
+            if (f) return f;
+        }
+    }
+
+    return fopen(fn, "rb");
+}
 
 static char* read_file_utf8(const char* fn) {
-    FILE* f=fopen(fn,"rb"); if(!f)return NULL;
+    FILE* f=open_utf8_path_rb(fn); if(!f)return NULL;
     if (fseek(f,0,SEEK_END) != 0) { fclose(f); return NULL; }
     long sz=ftell(f);
     if (sz < 0 || sz > MDVIEW_MAX_FILE_SIZE) { fclose(f); return NULL; }
@@ -3251,7 +3291,7 @@ static char* read_file_utf8(const char* fn) {
     return buf;
 }
 
-/* ── WebBrowser Control ──────────────────────────────────────────────── */
+/* --- WebBrowser Control --- */
 
 #ifndef READYSTATE_LOADED
 #define READYSTATE_LOADED      2
@@ -3301,7 +3341,7 @@ static void navigate_to_html(IWebBrowser2* pB, const char* html) {
     SafeArrayDestroy(sa); IHTMLDocument2_Release(pDoc);
 }
 
-/* ── Window Procedure ────────────────────────────────────────────────── */
+/* --- Window Procedure --- */
 
 static BOOL CALLBACK FindIEServerProc(HWND hwnd, LPARAM lParam) {
     wchar_t cls[64]; GetClassNameW(hwnd, cls, 64);
@@ -3460,7 +3500,7 @@ static LRESULT CALLBACK ContainerWndProc(HWND hwnd, UINT msg, WPARAM wP, LPARAM 
     return DefWindowProcW(hwnd,msg,wP,lP);
 }
 
-/* ── DLL Entry ───────────────────────────────────────────────────────── */
+/* --- DLL Entry --- */
 
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
     if(reason==DLL_PROCESS_ATTACH){g_hInstance=hInst;DisableThreadLibraryCalls(hInst);}
@@ -3483,7 +3523,7 @@ static void ensure_ie11_emulation(void) {
     }
 }
 
-/* ── TC Lister Plugin Exports ────────────────────────────────────────── */
+/* --- TC Lister Plugin Exports --- */
 
 __declspec(dllexport) HWND __stdcall ListLoad(HWND pw, char* file, int flags) {
     ensure_ie11_emulation();

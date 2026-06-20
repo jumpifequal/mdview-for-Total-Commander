@@ -1,3 +1,8 @@
+v3.8.2
+- fix: Ctrl+MouseWheel now uses the same persistent MDView font-size zoom path as Ctrl+Plus and Ctrl+Minus, updating the displayed zoom level and saved setting
+- fix: Markdown files with accented or non-ASCII filenames now open through the Unicode Windows file API instead of being declined and shown by Total Commander's plain-text fallback viewer
+- docs: added Unicode filename regression notes and handoff documentation for future maintenance
+
 v3.8.1
 - fix: compact changelog-style lines such as -add: and -change: retain visible line breaks without changing standard Markdown list parsing
 - docs: README and package metadata updated for the 3.8.1 release
