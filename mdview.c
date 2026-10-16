@@ -118,12 +118,17 @@ static void js_find_apply(MDViewData*, const wchar_t*, int, int);
 #define MDVIEW_SYNC_TIMER_ID 1
 #define MDVIEW_SYNC_TIMER_MS 120
 
+#define MDVIEW_ZOOM_MIN      9
+#define MDVIEW_ZOOM_DEFAULT 19
+#define MDVIEW_ZOOM_MAX     95
+#define MDVIEW_ZOOM_STEP     2
+
 /* --- INI Settings Persistence --- */
 
 static char g_iniPath[MAX_PATH] = { 0 };
 
 typedef struct {
-    int fontSize;    /* 9-30, default 19 */
+    int fontSize;    /* MDVIEW_ZOOM_MIN..MDVIEW_ZOOM_MAX */
     int isDark;      /* 0 or 1, -1 = auto */
     int maxWidth;    /* 0 = fit to window */
     int lineNums;    /* 0 or 1 */
@@ -131,11 +136,11 @@ typedef struct {
     wchar_t rawFontName[64]; /* raw text font name */
 } MDVSettings;
 
-static MDVSettings g_settings = { 19, -1, 0, 0, MDVIEW_RAW_FONT_PT, MDVIEW_RAW_FONT_NAME };
+static MDVSettings g_settings = { MDVIEW_ZOOM_DEFAULT, -1, 0, 0, MDVIEW_RAW_FONT_PT, MDVIEW_RAW_FONT_NAME };
 
 static void load_settings(void) {
     if (!g_iniPath[0]) return;
-    g_settings.fontSize = GetPrivateProfileIntA("MDView", "FontSize", 19, g_iniPath);
+    g_settings.fontSize = GetPrivateProfileIntA("MDView", "FontSize", MDVIEW_ZOOM_DEFAULT, g_iniPath);
     g_settings.isDark = GetPrivateProfileIntA("MDView", "DarkMode", -1, g_iniPath);
     g_settings.maxWidth = 0;
     g_settings.lineNums = GetPrivateProfileIntA("MDView", "LineNumbers", 0, g_iniPath);
@@ -145,8 +150,8 @@ static void load_settings(void) {
     MultiByteToWideChar(CP_ACP, 0, fontNameA, -1, g_settings.rawFontName, 64);
 
     /* Clamp */
-    if (g_settings.fontSize < 9) g_settings.fontSize = 9;
-    if (g_settings.fontSize > 30) g_settings.fontSize = 30;
+    if (g_settings.fontSize < MDVIEW_ZOOM_MIN) g_settings.fontSize = MDVIEW_ZOOM_MIN;
+    if (g_settings.fontSize > MDVIEW_ZOOM_MAX) g_settings.fontSize = MDVIEW_ZOOM_MAX;
     if (g_settings.rawFontSize < 6 || g_settings.rawFontSize > 72) g_settings.rawFontSize = MDVIEW_RAW_FONT_PT;
 }
 
@@ -705,7 +710,7 @@ static void show_context_menu(MDViewData* d, HWND hwnd, int x, int y) {
     {
         wchar_t zoomLabel[96];
         int zoomPct = 100;
-        if (hasState && st.fontSize > 0) zoomPct = (st.fontSize * 100 + 9) / 19;
+        if (hasState && st.fontSize > 0) zoomPct = (st.fontSize * 100 + MDVIEW_ZOOM_DEFAULT / 2) / MDVIEW_ZOOM_DEFAULT;
         _snwprintf_s(zoomLabel, _countof(zoomLabel), _TRUNCATE, L"Reset zoom\tCtrl+0 (%d%%)", zoomPct);
         AppendMenuW(hMenu, MF_STRING, IDM_ZOOM_RESET, zoomLabel);
     }
@@ -2451,9 +2456,12 @@ static void build_css(StrBuf* sb) {
 
 static void build_js(StrBuf* sb) {
     /* Initial values from settings */
-    char init[128];
-    _snprintf(init, sizeof(init), "<script>var fs=%d,mw=%d,ln=%d,tt=null;",
-            g_settings.fontSize, g_settings.maxWidth, g_settings.lineNums);
+    char init[256];
+    _snprintf(init, sizeof(init),
+            "<script>var fs=%d,mw=%d,ln=%d,rfs=%d,zmin=%d,zmax=%d,zdef=%d,zstep=%d,tt=null;",
+            g_settings.fontSize, g_settings.maxWidth, g_settings.lineNums,
+            g_settings.rawFontSize, MDVIEW_ZOOM_MIN, MDVIEW_ZOOM_MAX,
+            MDVIEW_ZOOM_DEFAULT, MDVIEW_ZOOM_STEP);
     sb_append(sb, init);
 
     sb_append(sb,
@@ -2522,7 +2530,7 @@ static void build_js(StrBuf* sb) {
     "function mdvSyncPoint(x,y){var r=mdvRawPane(),rr;if(r&&mdvIsSplit()){rr=r.getBoundingClientRect();if(x>=rr.left&&x<=rr.right&&y>=rr.top&&y<=rr.bottom){mdvRawActive=1;mdvLastX=x;mdvLastY=y;mdvSyncRawPoint(y-rr.top);return;}mdvRawActive=0;}mdvLastX=x;mdvLastY=y;mdvSyncRenderPoint(x,y)}"
     "function mdvSyncHere(){var r=mdvRawPane(),rr,y=mdvLastY;if(mdvRawActive){rr=r?r.getBoundingClientRect():null;mdvSyncRawPoint(rr?Math.max(0,y-rr.top):8);return;}mdvSyncRenderPoint(mdvLastX||24,mdvLastY||8)}"
     "function usv(){var s=document.getElementById('mdv-status');if(!s)return;"
-    "s.innerText='Zoom '+Math.round((fs*100)/19)+'%'+(ln?' | Line #':'');}"
+    "s.innerText='Zoom '+Math.round((fs*100)/zdef)+'%'+(ln?' | Line #':'');}"
 
     /* Char count */
     "function rcc(){var ct=document.getElementById('mdv-ct'),out=[],walker,n,pv;"
@@ -2541,9 +2549,9 @@ static void build_js(StrBuf* sb) {
     "function ucc(){var el=document.getElementById('mdv-char'),rw=document.getElementById('mdv-raw-char');if(el)el.innerText='MD chars: '+rcc();if(rw)rw.innerText='RAW chars: '+rawcc();}"
 
     /* Zoom */
-    "function zi(){fs=Math.min(fs+1,30);af()}"
-    "function zo(){fs=Math.max(fs-1,9);af()}"
-    "function zr(){fs=19;af()}"
+    "function zi(){fs=Math.min(fs+zstep,zmax);af()}"
+    "function zo(){fs=Math.max(fs-zstep,zmin);af()}"
+    "function zr(){fs=zdef;af()}"
     "function mdvToArray(nl){var a=[],i;if(!nl)return a;for(i=0;i<nl.length;i++)a.push(nl[i]);return a}"
     "function mdvHasClass(el,cls){var cn;if(!el||!cls)return false;cn=' '+(el.className||'')+' ';return cn.indexOf(' '+cls+' ')>=0}"
     "function mdvByClass(root,cls,tag){var out=[],els,i;root=root||document;els=root.getElementsByTagName(tag||'*');"
@@ -2576,7 +2584,8 @@ static void build_js(StrBuf* sb) {
     "function mmBodyFontPx(){var cs=window.getComputedStyle?window.getComputedStyle(document.body,null):null;"
     "var fz=cs&&cs.fontSize?parseFloat(cs.fontSize):parseFloat(document.body.style.fontSize);"
     "if(!(fz>0))fz=16;return fz;}"
-    "function af(){document.body.style.fontSize=fs+'px';syncMermaidTypography();usv();toast('Font: '+fs+'px')}"
+    "function arfs(){var raw=mdvRawPane();if(raw)raw.style.fontSize=((rfs*fs)/zdef)+'pt'}"
+    "function af(){document.body.style.fontSize=fs+'px';arfs();syncMermaidTypography();usv();toast('Zoom: '+Math.round((fs*100)/zdef)+'%')}"
 
     /* Theme toggle */
     "function td(){var b=document.body,h=document.documentElement;"
@@ -3126,7 +3135,7 @@ static void build_js(StrBuf* sb) {
     "if(rp){rp.onscroll=up;rp.onmousedown=mdvRenderDragStart;rp.onselectstart=function(){return !mdvRawDragging};rp.oncontextmenu=rp.onmousedown;}"
     "if(rawp){rawp.onmousedown=mdvRawDragStart;rawp.onmousemove=mdvRawDragMove;rawp.onmouseup=mdvRawDragEnd;rawp.onselectstart=function(){return !mdvRenderDragging};rawp.oncontextmenu=mdvRawDragStart;rawp.onscroll=function(){mdvRawActive=1};}"
     "document.onmouseup=function(e){if(mdvRawDragging)mdvRawDragEnd(e||window.event);else if(mdvRenderDragging)mdvEndPaneDrag();return true};"
-    "afw();fitImages();initMermaid();shAll();initCollapse();initDetailsFallback();initLinkTooltips();"
+    "afw();arfs();fitImages();initMermaid();shAll();initCollapse();initDetailsFallback();initLinkTooltips();"
     "if(ln)tl();"  /* apply line numbers if saved */
     "usv();"
     "ucc();"
@@ -3370,7 +3379,7 @@ static void save_current_settings(IWebBrowser2* pB) {
         char title[128];
         WideCharToMultiByte(CP_UTF8, 0, bTitle, -1, title, sizeof(title), NULL, NULL);
         SysFreeString(bTitle);
-        int rfs=19, rmw=0, rln=0, rdk=0;
+        int rfs=MDVIEW_ZOOM_DEFAULT, rmw=0, rln=0, rdk=0;
         sscanf_s(title, "%d,%d,%d,%d", &rfs, &rmw, &rln, &rdk);
         save_setting_int("FontSize", rfs);
         save_setting_int("MaxWidth", rmw);
