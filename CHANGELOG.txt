@@ -1,3 +1,47 @@
+v3.9.6
+- fix: tokenize fallback syntax highlighting before writing HTML to preserve PHP, HTML, and XML code text (#1)
+- fix: recognize ATX headings immediately after paragraphs and include all six levels in the table of contents (#2)
+- add: 500% document zoom with 2 px steps and synchronized scaling in Split view (#3)
+- fix: run the publisher without a Git pager and confirm the release commit on GitHub main
+
+v3.9.5
+- add: Mermaid Packet diagrams with bit ranges, relative widths, and configurable rows
+- add: ZenUML sequence diagrams with nested calls, returns, and control fragments
+- add: Mermaid Event Modeling swimlanes with data and inferred or explicit relations
+- add: Mermaid Ishikawa cause-and-effect diagrams with nested fishbone branches
+- package: publish separate Win32/x64 and Windows XP SP3 ZIPs, with an XP-target check during packaging
+- docs: add current Split search, Packet, and Event Modeling screenshots and manual publishing steps
+
+v3.9.4
+- add: Mermaid Radar charts with multiple series, scales, and legends
+- add: Mermaid Treemap diagrams with weighted leaves and nested sections
+- add: Mermaid Venn diagrams with sized sets, overlaps, and labels
+
+v3.9.3
+- add: Mermaid Git graphs with branch lanes, merges, tags, and cherry-picks
+- add: Mermaid mind maps with a centered tree, colors by branch, and node shapes
+- fix: reveal and highlight the corresponding source text when navigating search hits in Split view
+
+v3.9.2
+- add: Mermaid Gantt charts with date axes, task dependencies, milestones, and excluded dates
+- add: Mermaid Timeline diagrams with grouped periods, multiple events, and two layout directions
+
+v3.9.1
+- add: Mermaid Entity Relationship diagrams with entity attributes, keys, and crow's-foot cardinalities
+- add: Mermaid Requirement diagrams with SysML requirements, elements, and relationships
+
+v3.9.0
+- add: Preview and Code modes (Ctrl+1 and Ctrl+2), with Ctrl+M for existing split view and persistent source word wrap (Ctrl+W)
+- fix: tokenize C and C++ before escaping HTML so comments, strings, directives and literals retain their text and colors
+- add: JSON/JSONC key and value colors, plus diff file headers, hunks, insertions and deletions
+- add: GitHub footnotes with backlinks, five GitHub alert types, and angle-bracket and bare autolinks
+- add: UTF-16 LE/BE and Windows-1252 decoding alongside UTF-8, with heuristic detection for BOM-less UTF-16
+- add: selectable HTML rendering for a TeX subset, including fractions, roots, limits and equation tags
+- add: color modes for Windows, fixed light, fixed dark and Total Commander, with selectable light and dark palettes and highlight colors
+- fix: route long and cyclic Mermaid connectors around nodes and fit the drawing, labels and arrowheads to the preview
+- fix: resolve relative HTML image sources and preserve their declared dimensions and alignment
+- add: source publishing and distribution packaging tools
+
 v3.8.2
 - fix: Ctrl+MouseWheel now uses the same persistent MDView font-size zoom path as Ctrl+Plus and Ctrl+Minus, updating the displayed zoom level and saved setting
 - fix: Markdown files with accented or non-ASCII filenames now open through the Unicode Windows file API instead of being declined and shown by Total Commander's plain-text fallback viewer

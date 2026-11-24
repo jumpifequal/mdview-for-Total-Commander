@@ -4,3 +4,6 @@ cl /LD /O1 /GL /DNDEBUG mdview.c mdview.def ^
   Win32\Release\resource.res ^
   ole32.lib oleaut32.lib uuid.lib advapi32.lib user32.lib gdi32.lib shell32.lib ^
   /link /OUT:Win32\Release\mdview.wlx /IMPLIB:Win32\Release\mdview.lib /LTCG
+
+@if errorlevel 1 exit /b %errorlevel%
+@xcopy /D /Y /I "Themes\*.json" "Win32\Release\Themes"

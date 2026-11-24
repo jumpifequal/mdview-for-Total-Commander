@@ -146,3 +146,18 @@ stateDiagram-v2
     Approved --> Published : publish
     Published --> [*]
 ```
+
+## Flowchar LR
+```mermaid
+flowchart LR
+A[Entwickler<br>bearbeitet .vbp] --> B[git add]
+B --> C{clean-Filter<br>vbp-clean.ps1}
+C -->|normalisiert| D[(lokales Repo)]
+D --> E[git push]
+E --> F{pre-receive-Hook}
+F -->|Churn| X[Push abgelehnt]
+F -->|ok| G[GitLab]
+G --> H{CI: vbp-normalized}
+H -->|Churn| Y[MR blockiert]
+H -->|ok| Z[Merge moeglich]
+```

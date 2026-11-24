@@ -156,6 +156,17 @@
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="mdview_math.inc" />
+    <None Include="mdview_theme.inc" />
+    <None Include="mdview_autolink.inc" />
+    <None Include="mdview_encoding.inc" />
+    <None Include="mdview_highlight.inc" />
+    <MdviewPalette Include="$(MSBuildProjectDirectory)\Themes\*.json" />
+  </ItemGroup>
+  <Target Name="CopyMdviewPalettes" AfterTargets="Build">
+    <Copy SourceFiles="@(MdviewPalette)" DestinationFolder="$(OutDir)Themes" SkipUnchangedFiles="true" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
