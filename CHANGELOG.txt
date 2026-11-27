@@ -1,3 +1,6 @@
+v3.9.7
+- fix: require matching underscore emphasis delimiters at text boundaries and preserve internal underscores
+
 v3.9.6
 - fix: tokenize fallback syntax highlighting before writing HTML to preserve PHP, HTML, and XML code text (#1)
 - fix: recognize ATX headings immediately after paragraphs and include all six levels in the table of contents (#2)

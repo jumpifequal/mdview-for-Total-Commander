@@ -1,8 +1,8 @@
 #ifndef RESOURCE_H_INCLUDED
 #define RESOURCE_H_INCLUDED
 
-#define MDVIEW_VERSION                  "3.9.6"
-#define VER_FILEVERSION                 3,9,6,0
+#define MDVIEW_VERSION                  "3.9.7"
+#define VER_FILEVERSION                 3,9,7,0
 #define VER_FILEVERSION_STR             MDVIEW_VERSION "\0"
 #define VER_PRODUCTVERSION              VER_FILEVERSION
 #define VER_PRODUCTVERSION_STR          VER_FILEVERSION_STR

@@ -8,6 +8,12 @@ This is a paragraph with **bold**, *italic*, ***bold italic***, and ~~strikethro
 
 Here's a [link to Anthropic](https://www.anthropic.com) and an autolink: https://example.com
 
+
+
+_TEST_ITALICO_
+
+_TEST_NON_ITALICO
+
 ## Headings Hierarchy
 
 ### Third Level
@@ -190,9 +196,9 @@ if (validateInput(testData)) {
 ## Blockquote
 
 > This is a blockquote. It can contain **formatting** and `code`.
-> 
+>
 > It can also span multiple paragraphs.
-> 
+>
 > > And be nested.
 
 ## Table

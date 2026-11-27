@@ -1,4 +1,4 @@
-# MDView 3.9.6
+# MDView 3.9.7
 
 **A Markdown viewer plugin for Total Commander.**
 
@@ -184,7 +184,7 @@ Press `F1` inside the viewer for an on-screen reference.
 
 ## Version
 
-Source version is **MDView 3.9.6**.
+Source version is **MDView 3.9.7**.
 
 ## Download
 
@@ -192,8 +192,8 @@ Use the [Releases page](../../releases) to choose the package for your system.
 
 | Package | Plugin files |
 | --- | --- |
-| `WLX_mdview_TC-plugin_v3.9.6.zip` | `mdview.wlx` for 32-bit Total Commander and `mdview.wlx64` for 64-bit Total Commander |
-| `WLX_mdviewXP_TC-plugin_v3.9.6.zip` | `mdview_xp.wlx` for 32-bit Total Commander on Windows XP SP3 |
+| `WLX_mdview_TC-plugin_v3.9.7.zip` | `mdview.wlx` for 32-bit Total Commander and `mdview.wlx64` for 64-bit Total Commander |
+| `WLX_mdviewXP_TC-plugin_v3.9.7.zip` | `mdview_xp.wlx` for 32-bit Total Commander on Windows XP SP3 |
 
 ## Installation
 

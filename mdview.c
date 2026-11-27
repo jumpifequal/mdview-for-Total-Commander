@@ -1777,6 +1777,10 @@ static int html_block_delta(const char* line, const char* tag) {
 
 #include "mdview_autolink.inc"
 
+static int is_underscore_boundary(unsigned char ch) {
+    return isspace(ch) || ispunct(ch);
+}
+
 static void parse_inline_impl(StrBuf* sb, const char* t, size_t len, const char* currentFile,
                               const MdReferenceMap* refs, int allowLinks) {
     size_t i = 0;
@@ -1951,20 +1955,54 @@ static void parse_inline_impl(StrBuf* sb, const char* t, size_t len, const char*
             size_t s2=i+2,e2=s2; while(e2+1<len&&!(t[e2]=='='&&t[e2+1]=='='))e2++;
             if(e2+1<len&&e2>s2){ sb_append(sb,"<span class=\"mdv-highlight\">"); parse_inline_impl(sb,t+s2,e2-s2,currentFile,refs,linkAllowed); sb_append(sb,"</span>"); i=e2+2; continue; }
         }
+        /* Underscore emphasis requires delimiters at the edges of the text. */
+        if (t[i]=='_') {
+            size_t start=i+1;
+            while (start<len && t[start]=='_') ++start;
+            size_t width=start-i;
+            if (width<=3 && start<len && !isspace((unsigned char)t[start]) &&
+                (i==0 || is_underscore_boundary((unsigned char)t[i-1]))) {
+                size_t end=start;
+                while (end<len) {
+                    if (t[end]=='\\' && end+1<len && (t[end+1]=='_' || t[end+1]=='\\')) {
+                        end+=2;
+                        continue;
+                    }
+                    if (t[end]!='_') { ++end; continue; }
+                    size_t after=end+1;
+                    while (after<len && t[after]=='_') ++after;
+                    if (after-end==width && !isspace((unsigned char)t[end-1]) &&
+                        (after==len || is_underscore_boundary((unsigned char)t[after]))) {
+                        if (width>=2) sb_append(sb,"<strong>");
+                        if (width!=2) sb_append(sb,"<em>");
+                        parse_inline_impl(sb,t+start,end-start,currentFile,refs,linkAllowed);
+                        if (width!=2) sb_append(sb,"</em>");
+                        if (width>=2) sb_append(sb,"</strong>");
+                        i=after;
+                        break;
+                    }
+                    end=after;
+                }
+                if (end<len) continue;
+            }
+            sb_append_slice(sb,t+i,width);
+            i=start;
+            continue;
+        }
         /* Bold+Italic ***text*** */
-        if ((t[i]=='*'||t[i]=='_')&&i+2<len&&t[i+1]==t[i]&&t[i+2]==t[i]) {
+        if (t[i]=='*'&&i+2<len&&t[i+1]==t[i]&&t[i+2]==t[i]) {
             char m=t[i]; size_t s3=i+3,e3=s3;
             while(e3+2<len&&!(t[e3]==m&&t[e3+1]==m&&t[e3+2]==m))e3++;
             if(e3+2<len){ sb_append(sb,"<strong><em>"); parse_inline_impl(sb,t+s3,e3-s3,currentFile,refs,linkAllowed); sb_append(sb,"</em></strong>"); i=e3+3; continue; }
         }
         /* Bold **text** */
-        if ((t[i]=='*'||t[i]=='_')&&i+1<len&&t[i+1]==t[i]) {
+        if (t[i]=='*'&&i+1<len&&t[i+1]==t[i]) {
             char m=t[i]; size_t s2=i+2,e2=s2;
             while(e2+1<len&&!(t[e2]==m&&t[e2+1]==m))e2++;
             if(e2+1<len&&e2>s2){ sb_append(sb,"<strong>"); parse_inline_impl(sb,t+s2,e2-s2,currentFile,refs,linkAllowed); sb_append(sb,"</strong>"); i=e2+2; continue; }
         }
         /* Italic *text* */
-        if ((t[i]=='*'||t[i]=='_')&&i+1<len&&t[i+1]!=t[i]&&t[i+1]!=' ') {
+        if (t[i]=='*'&&i+1<len&&t[i+1]!=t[i]&&t[i+1]!=' ') {
             char m=t[i]; size_t s1=i+1,e1=s1; while(e1<len&&t[e1]!=m)e1++;
             if(e1<len&&e1>s1&&t[e1-1]!=' '){ sb_append(sb,"<em>"); parse_inline_impl(sb,t+s1,e1-s1,currentFile,refs,linkAllowed); sb_append(sb,"</em>"); i=e1+1; continue; }
         }
