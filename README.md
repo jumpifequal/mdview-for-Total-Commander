@@ -74,7 +74,7 @@ The repository includes a dedicated `ReleaseXP|Win32` Visual Studio configuratio
 - **TC copy as text support** - Total Commander "Copy as text" exports only the rendered markdown text, without the viewer status overlays
 - **Expand / collapse** - long code blocks and blockquotes are collapsed by default with a "Show more" button
 - **Raw HTML collapsible sections** - block-level `<details>` / `<summary>` sections are preserved, with a viewer fallback for older MSHTML engines that do not implement native HTML5 details controls
-- **Persistent settings** - font size, theme, line numbers, and raw view settings are saved and restored between sessions
+- **Persistent settings** - font size, theme, line numbers, raw view settings, and last search text (`LastSearch` under `[MDView]`, prefilled on open so `F3`/`Shift+F3` work) are saved and restored between sessions
 - **Print support** - `Ctrl+P` renders a clean printable version
 - **Progress bar** - subtle reading position indicator at the top of the viewport
 - **Full window resize** - content fills the viewport correctly when the lister window is resized or maximised

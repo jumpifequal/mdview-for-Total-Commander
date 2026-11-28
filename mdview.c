@@ -136,6 +136,8 @@ static void js_find_apply(MDViewData*, const wchar_t*, int, int);
 #define MDVIEW_ZOOM_MAX (MDVIEW_ZOOM_DEFAULT * 5)
 #define MDVIEW_ZOOM_STEP 2
 
+#define MDVIEW_LAST_SEARCH 1024
+
 static char g_iniPath[MAX_PATH] = { 0 };
 static int g_hasListerHost;
 
@@ -148,6 +150,7 @@ typedef struct {
     wchar_t rawFontName[64]; /* raw text font name */
     wchar_t themeFile[2][MAX_PATH];
     int wordWrap;
+    wchar_t lastSearch[MDVIEW_LAST_SEARCH]; /* last find-bar text, prefilled on open */
 } MDVSettings;
 
 static MDVSettings g_settings = { MDVIEW_ZOOM_DEFAULT, 0, 0, 0, MDVIEW_RAW_FONT_PT, MDVIEW_RAW_FONT_NAME, {{0}}, 0 };
@@ -179,6 +182,7 @@ static void load_settings(void) {
     char fontNameA[64];
     GetPrivateProfileStringA("MDView", "RawFontName", MDVIEW_RAW_FONT_NAME_A, fontNameA, sizeof(fontNameA), g_iniPath);
     MultiByteToWideChar(CP_ACP, 0, fontNameA, -1, g_settings.rawFontName, 64);
+    GetPrivateProfileStringW(L"MDView", L"LastSearch", L"", g_settings.lastSearch, MDVIEW_LAST_SEARCH, ini);
 
     /* Clamp */
     if (g_settings.fontSize < MDVIEW_ZOOM_MIN) g_settings.fontSize = MDVIEW_ZOOM_MIN;
@@ -197,6 +201,15 @@ static void save_setting_str(const char* key, const wchar_t* val) {
     char buf[64];
     WideCharToMultiByte(CP_ACP, 0, val, -1, buf, sizeof(buf), NULL, NULL);
     WritePrivateProfileStringA("MDView", key, buf, g_iniPath);
+}
+
+static void persist_last_search(const wchar_t* val) {
+    wchar_t ini[MAX_PATH];
+    if (!val) val = L"";
+    wcsncpy_s(g_settings.lastSearch, MDVIEW_LAST_SEARCH, val, _TRUNCATE);
+    if (!g_iniPath[0]) return;
+    if (!MultiByteToWideChar(CP_ACP, 0, g_iniPath, -1, ini, MAX_PATH)) return;
+    WritePrivateProfileStringW(L"MDView", L"LastSearch", g_settings.lastSearch, ini);
 }
 
 static LONG_PTR mdview_set_window_ptr(HWND hwnd, int index, LONG_PTR value) {
@@ -324,6 +337,50 @@ static wchar_t* get_element_text_by_id(MDViewData* d, const wchar_t* id) {
 
 static wchar_t* get_rendered_content_text(MDViewData* d) {
     return get_element_text_by_id(d, L"mdv-ct");
+}
+
+/* Read the find-bar input value via COM. Returns 1 on success (out may be empty). */
+static int get_find_text(IWebBrowser2* pB, wchar_t* out, DWORD cap) {
+    IDispatch* pDisp = NULL;
+    IHTMLDocument2* pDoc2 = NULL;
+    IHTMLDocument3* pDoc3 = NULL;
+    IHTMLElement* pEl = NULL;
+    IHTMLInputElement* pInput = NULL;
+    BSTR bId = NULL;
+    BSTR bVal = NULL;
+
+    if (!pB || !out || cap == 0) return 0;
+    out[0] = L'\0';
+
+    IWebBrowser2_get_Document(pB, &pDisp);
+    if (!pDisp) return 0;
+    IDispatch_QueryInterface(pDisp, &IID_IHTMLDocument2, (void**)&pDoc2);
+    IDispatch_Release(pDisp);
+    if (!pDoc2) return 0;
+    IHTMLDocument2_QueryInterface(pDoc2, &IID_IHTMLDocument3, (void**)&pDoc3);
+    IHTMLDocument2_Release(pDoc2);
+    if (!pDoc3) return 0;
+    bId = SysAllocString(L"mdv-fi");
+    if (!bId) { IHTMLDocument3_Release(pDoc3); return 0; }
+    IHTMLDocument3_getElementById(pDoc3, bId, &pEl);
+    SysFreeString(bId);
+    IHTMLDocument3_Release(pDoc3);
+    if (!pEl) return 0;
+    if (FAILED(IHTMLElement_QueryInterface(pEl, &IID_IHTMLInputElement, (void**)&pInput))) {
+        IHTMLElement_Release(pEl);
+        return 0;
+    }
+    IHTMLElement_Release(pEl);
+    if (FAILED(IHTMLInputElement_get_value(pInput, &bVal))) {
+        IHTMLInputElement_Release(pInput);
+        return 0;
+    }
+    IHTMLInputElement_Release(pInput);
+    if (bVal) {
+        wcsncpy_s(out, cap, bVal, _TRUNCATE);
+        SysFreeString(bVal);
+    }
+    return 1;
 }
 
 static void do_copy_text(MDViewData* d) {
@@ -3230,6 +3287,26 @@ static void build_js(StrBuf* sb, ViewMode view, int wrap) {
               g_settings.fontSize,g_settings.maxWidth,g_settings.lineNums,view,wrap,g_settings.rawFontSize,
               MDVIEW_ZOOM_MIN,MDVIEW_ZOOM_MAX,MDVIEW_ZOOM_DEFAULT,MDVIEW_ZOOM_STEP);
     sb_append(sb, init);
+    /* Persisted find text: prefill only, F3/F7 steps work on the prefilled value */
+    {
+        char utf8[MDVIEW_LAST_SEARCH * 3 + 1];
+        if (g_settings.lastSearch[0] &&
+            WideCharToMultiByte(CP_UTF8, 0, g_settings.lastSearch, -1, utf8, sizeof(utf8), NULL, NULL) > 0) {
+            size_t k;
+            sb_append(sb, "var mdvLastSearch='");
+            for (k = 0; utf8[k]; ++k) {
+                char c = utf8[k];
+                if (c == '\\' || c == '\'') sb_append_char(sb, '\\');
+                if (c == '\r') { sb_append(sb, "\\r"); continue; }
+                if (c == '\n') { sb_append(sb, "\\n"); continue; }
+                if (c == '<') { sb_append(sb, "\\x3c"); continue; }
+                sb_append_char(sb, c);
+            }
+            sb_append(sb, "';");
+        } else {
+            sb_append(sb, "var mdvLastSearch='';");
+        }
+    }
 
     sb_append(sb,
     /* Toast */
@@ -5863,6 +5940,7 @@ static void build_js(StrBuf* sb, ViewMode view, int wrap) {
     "window.onresize=function(){syncMermaidTypography();fitImages()};"
     "window.onload=function(){"
     "var inp=document.getElementById('mdv-fi');if(inp){"
+    "if(typeof mdvLastSearch!=='undefined'&&mdvLastSearch&&!inp.value)inp.value=mdvLastSearch;"
     "var trig=function(){var s=inp;if(s._db)clearTimeout(s._db);"
     "s._db=setTimeout(function(){qf(0)},250)};"
     "inp.oninput=trig;"
@@ -6002,6 +6080,7 @@ static void js_find_apply(MDViewData* d, const wchar_t* needle, int matchCase, i
         esc, matchCase ? 1 : 0, wholeWords ? 1 : 0);
 
     exec_js(d->pBrowser, js);
+    if (needle && needle[0]) persist_last_search(needle);
 }
 
 static void js_find_step(MDViewData* d, int backwards) {
@@ -6108,7 +6187,10 @@ static BOOL CALLBACK FindIEServerProc(HWND hwnd, LPARAM lParam) {
 
 /* Read current JS state and save to INI */
 static void save_current_settings(IWebBrowser2* pB) {
+    wchar_t found[MDVIEW_LAST_SEARCH];
     if (!pB || !g_iniPath[0]) return;
+    if (get_find_text(pB, found, _countof(found)) && found[0])
+        persist_last_search(found);
     /* Read values from JS globals via execScript + document.title hack */
     exec_js(pB, L"document.title=''+fs+','+mw+','+ln+','+mdvWordWrap");
     /* Now read the title back */
@@ -6181,6 +6263,11 @@ static int load_file_into_existing_view(MDViewData* d, const char* fileUtf8) {
     MDViewHtmlState state;
     int wrap=g_settings.wordWrap;
     if (get_html_state(d,&state)) { d->viewMode=(ViewMode)state.viewMode; wrap=state.wordWrap; }
+    {
+        wchar_t cur[MDVIEW_LAST_SEARCH];
+        if (get_find_text(d->pBrowser, cur, _countof(cur)) && cur[0])
+            persist_last_search(cur);
+    }
     build_js(&jsBuf,d->viewMode,wrap);
     ui = get_ui();
 
